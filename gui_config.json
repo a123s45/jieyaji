@@ -1,7 +1,7 @@
 {
   "background": "bg_20260803_213346.jpg",
   "panel_color": "#ffffff",
-  "panel_opacity": 0,
+  "panel_opacity": 0.25,
   "threads": 2,
   "width": 1428,
   "height": 764,

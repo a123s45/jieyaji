@@ -23,11 +23,30 @@ function Quote-Arg([string]$s) {
     return '"' + $s.Replace('"', '\"') + '"'
 }
 
+# Kill every descendant of a process (orphaned grandchildren like hung unrar.exe
+# keep source archives locked forever). Call after the parent has exited.
+function Stop-ProcessTree([int]$parentPid) {
+    try {
+        $children = Get-CimInstance Win32_Process -Filter ("ParentProcessId=" + $parentPid) -ErrorAction SilentlyContinue
+        foreach ($c in $children) {
+            Stop-ProcessTree $c.ProcessId
+            try { Stop-Process -Id $c.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    } catch {}
+}
+
+# Give a started process an already-closed stdin: any interactive prompt
+# (e.g. unrar asking for a password) gets EOF instantly instead of hanging forever.
+function Close-ProcStdin($proc) {
+    try { $proc.StandardInput.Close() } catch {}
+}
+
 function Invoke-MagicExtract([string]$file, [string]$outDir, [string]$pw) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $MagicExe
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
     $psi.Arguments = 'extract ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
     $psi.Arguments += ' --create-log-files false'
     if ($pw -ne '') {
@@ -35,11 +54,16 @@ function Invoke-MagicExtract([string]$file, [string]$outDir, [string]$pw) {
     }
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
         if (-not $p.WaitForExit(300000)) {
             try { $p.Kill(); $p.WaitForExit() } catch {}
+            Stop-ProcessTree $p.Id
+            Write-Log ("WARN magic-extractor timeout: " + $file)
             return $false
         }
-        return $p.ExitCode -eq 0
+        $code = $p.ExitCode
+        Stop-ProcessTree $p.Id
+        return $code -eq 0
     } catch {
         Write-Log ("WARN magic-extractor start failed: " + $_.Exception.Message)
         return $false
@@ -51,9 +75,11 @@ function Test-Password7z([string]$file, [string]$pw) {
     $psi.FileName = $SevenZip
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
     $psi.Arguments = 't ' + (Quote-Arg ('-p' + $pw)) + ' -y ' + (Quote-Arg $file)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
         if (-not $p.WaitForExit(60000)) {
             try { $p.Kill(); $p.WaitForExit() } catch {}
             return $false
@@ -79,10 +105,12 @@ function Test-PasswordFast([string]$file, [string]$pwFile) {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.Arguments = (Quote-Arg $script) + ' ' + (Quote-Arg $file) + ' ' + (Quote-Arg $pwFile)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
         $stdout = $p.StandardOutput.ReadToEnd()
         $stderr = $p.StandardError.ReadToEnd()
         if (-not $p.WaitForExit(300000)) {
@@ -201,9 +229,11 @@ function Detect-ArchiveExtension([string]$file) {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
     $psi.Arguments = 'l ' + (Quote-Arg $file)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
         $stdout = $p.StandardOutput.ReadToEnd()
         $p.WaitForExit(30000)
         foreach ($line in ($stdout -split "`r?`n")) {
