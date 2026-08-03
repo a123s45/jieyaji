@@ -96,6 +96,14 @@ function Test-PasswordFast([string]$file, [string]$pwFile) {
                 if ($b64 -eq '') { return '' }
                 return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
             }
+            if ($line -eq 'NOTFOUND') {
+                Write-Log 'fast test: tried all candidates, no match (fallback to 7z loop)'
+                return $null
+            }
+            if ($line -eq 'UNSUPPORTED') {
+                Write-Log 'fast test: format not supported by fast path, skipped (fallback to 7z loop)'
+                return $null
+            }
         }
         if ($stderr -and $stderr.Trim() -ne '') {
             Write-Log ('WARN fast password test stderr: ' + ($stderr -replace "`r?`n", ' '))
