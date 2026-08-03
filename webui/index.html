@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>解压姬</title>
+<style>
+:root {
+  --panel-color: 255, 255, 255;
+  --panel-opacity: 0.5;
+  --accent: #2f6feb;
+  --text: #1f2733;
+  --muted: #5a6b7d;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  color: var(--text);
+  background: #eef2f8;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  overflow: hidden;
+}
+body.has-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+#app {
+  position: relative;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 12px;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 4px 6px;
+}
+header h1 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: 0;
+  color: #163a6b;
+}
+header .sub { color: var(--muted); font-size: 13px; }
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+.panel {
+  background: rgba(var(--panel-color), var(--panel-opacity));
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(40, 60, 90, 0.10);
+}
+aside {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+button {
+  border: 1px solid rgba(47, 111, 235, 0.35);
+  background: rgba(255, 255, 255, 0.5);
+  color: #163a6b;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background .15s, transform .05s;
+}
+button:hover { background: rgba(47, 111, 235, 0.15); }
+button:active { transform: translateY(1px); }
+button.primary { background: rgba(47, 111, 235, 0.28); }
+label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+input[type=text], select, input[type=color] {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid rgba(80, 100, 130, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--text);
+  font: inherit;
+}
+input[type=range] { width: 100%; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+main {
+  display: grid;
+  grid-template-rows: 1fr 1fr auto auto;
+  gap: 12px;
+  min-height: 0;
+}
+.files-panel, .log-panel {
+  padding: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.section-title { font-size: 13px; font-weight: 700; color: #163a6b; margin-bottom: 8px; }
+.file-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.file-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-item:hover { background: rgba(47, 111, 235, 0.12); }
+.drop-hint {
+  border: 2px dashed rgba(47, 111, 235, 0.4);
+  border-radius: 10px;
+  padding: 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 8px;
+}
+#log {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 8px;
+  font: 12px/1.55 Consolas, monospace;
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.progress-wrap {
+  height: 18px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+}
+.progress-bar {
+  width: 0%;
+  height: 100%;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #4f9dff, #2f6feb);
+  transition: width .3s ease;
+}
+.status { font-size: 13px; color: var(--muted); padding: 0 4px; }
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(47, 111, 235, 0.18);
+  backdrop-filter: blur(6px);
+  font-size: 22px;
+  font-weight: 700;
+  color: #163a6b;
+  pointer-events: none;
+  z-index: 99;
+}
+.drag-overlay.show { display: flex; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>解压姬</h1>
+    <span class="sub">拖入文件自动识别格式，按密码本解压到同名目录</span>
+  </header>
+  <div class="layout">
+    <aside class="panel">
+      <button id="btnAdd">添加文件</button>
+      <button id="btnClear">清空列表</button>
+      <button id="btnStart" class="primary">开始解压</button>
+      <div>
+        <label>密码本</label>
+        <input type="text" id="pwFile" value="D:\解压姬\passwords.txt">
+      </div>
+      <div>
+        <label>解压线程</label>
+        <select id="threads">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+      <label class="check"><input type="checkbox" id="collapse" checked> 解压后折叠同名目录</label>
+      <label class="check"><input type="checkbox" id="deleteSource"> 解压完成之后删除原文件</label>
+      <label class="check"><input type="checkbox" id="magicFallback"> 密码试不出时用 magic-extractor 逐个完整解压硬试（极慢，大包慎用）</label>
+      <div>
+        <label>导入新密码</label>
+        <input type="text" id="newPw" placeholder="粘贴新密码">
+        <button id="btnImportPw" style="margin-top:6px">导入密码本</button>
+      </div>
+      <div>
+        <label>面板透明度</label>
+        <input type="range" id="panelOpacity" min="0" max="1" step="0.05" value="0.5">
+      </div>
+      <button id="btnBg">切换背景图</button>
+    </aside>
+    <main>
+      <section class="panel files-panel">
+        <div class="section-title">文件列表（点击条目移除）</div>
+        <div class="file-list" id="fileList"></div>
+        <div class="drop-hint">把文件或文件夹拖到这里</div>
+      </section>
+      <section class="panel log-panel">
+        <div class="section-title">运行日志</div>
+        <pre id="log"></pre>
+      </section>
+      <div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="status" id="status">就绪</div>
+    </main>
+  </div>
+</div>
+<div class="drag-overlay" id="dragOverlay">松开鼠标开始解压</div>
+<input type="file" id="fileInput" multiple hidden>
+<input type="file" id="bgInput" accept="image/*" hidden>
+
+<script>
+const $ = id => document.getElementById(id);
+let queue = [];
+let jobId = null;
+let pollTimer = null;
+let lastLogCount = 0;
+
+function filePathOf(file) {
+  return file.path || file.webkitRelativePath || '';
+}
+
+function renderList() {
+  const box = $('fileList');
+  box.innerHTML = '';
+  queue.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.title = p;
+    div.textContent = (i + 1) + '. ' + p;
+    div.addEventListener('click', () => {
+      queue.splice(i, 1);
+      renderList();
+    });
+    box.appendChild(div);
+  });
+}
+
+function addFiles(fileList) {
+  let added = 0;
+  for (const f of fileList) {
+    const p = filePathOf(f);
+    if (p && !queue.includes(p)) {
+      queue.push(p);
+      added++;
+    }
+  }
+  if (added === 0) {
+    logLine('未能读取文件路径，请从资源管理器拖拽文件到窗口内');
+  }
+  renderList();
+}
+
+function addPaths(pathList) {
+  let added = 0;
+  for (const p of pathList) {
+    if (p && !queue.includes(p)) {
+      queue.push(p);
+      added++;
+    }
+  }
+  if (added === 0) {
+    logLine('未能读取文件路径，请使用“添加文件”按钮');
+  }
+  renderList();
+}
+
+function pathsFromDrop(e) {
+  const out = [];
+  if (e.dataTransfer) {
+    const uriList = e.dataTransfer.getData('text/uri-list') || '';
+    const lines = uriList.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('#'));
+    for (const line of lines) {
+      if (line.startsWith('file:///')) {
+        try {
+          out.push(decodeURIComponent(line.slice(7).replace(/\//g, '\\')));
+        } catch (_) {}
+      } else if (/^[A-Za-z]:\\/.test(line)) {
+        out.push(line);
+      }
+    }
+    if (out.length === 0 && e.dataTransfer.files) {
+      for (const f of e.dataTransfer.files) {
+        const p = filePathOf(f);
+        if (p) out.push(p);
+      }
+    }
+  }
+  return out;
+}
+
+function logLine(text) {
+  const box = $('log');
+  box.textContent += text + '\n';
+  box.scrollTop = box.scrollHeight;
+}
+
+window.addEventListener('error', e => {
+  logLine('JS错误: ' + e.message);
+});
+window.addEventListener('unhandledrejection', e => {
+  logLine('JS异步错误: ' + ((e.reason && e.reason.message) || e.reason));
+});
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  return res.json();
+}
+
+function saveConfig(partial) {
+  api('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(partial)
+  });
+}
+
+let saveTimer = null;
+function saveWindowState() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveConfig({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      x: window.screenX,
+      y: window.screenY
+    });
+  }, 400);
+}
+
+function applyConfig(cfg) {
+  if (cfg.background) {
+    document.body.style.backgroundImage = "url('/backgrounds/" + cfg.background + "')";
+    document.body.classList.add('has-bg');
+  }
+  if (cfg.panel_opacity) {
+    $('panelOpacity').value = cfg.panel_opacity;
+    applyPanelOpacity(cfg.panel_opacity);
+  }
+  if (cfg.threads) {
+    $('threads').value = String(cfg.threads);
+  }
+}
+
+function applyPanelColor(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  document.documentElement.style.setProperty('--panel-color', r + ',' + g + ',' + b);
+}
+
+function applyPanelOpacity(v) {
+  document.documentElement.style.setProperty('--panel-opacity', String(v));
+}
+
+async function startExtract() {
+  try {
+    if (queue.length === 0) {
+      logLine('请先添加文件');
+      return;
+    }
+    const data = await api('/api/extract', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        files: queue,
+        password_file: $('pwFile').value,
+        threads: parseInt($('threads').value, 10),
+        collapse: $('collapse').checked,
+        delete_source: $('deleteSource').checked,
+        magic_fallback: $('magicFallback').checked
+      })
+    });
+    if (!data.job_id) {
+      logLine('启动失败: ' + (data.error || 'unknown'));
+      $('btnStart').disabled = false;
+      return;
+    }
+    jobId = data.job_id;
+    lastLogCount = 0;
+    $('log').textContent = '';
+    $('btnStart').disabled = true;
+    $('status').textContent = '正在解压...';
+    pollTimer = setInterval(pollStatus, 500);
+  } catch (err) {
+    logLine('启动异常: ' + err.message);
+    $('btnStart').disabled = false;
+  }
+}
+
+async function pollStatus() {
+  if (!jobId) return;
+  try {
+    const data = await api('/api/status/' + jobId);
+    if (data.error) {
+      logLine('状态查询失败: ' + data.error);
+      clearInterval(pollTimer);
+      pollTimer = null;
+      jobId = null;
+      $('btnStart').disabled = false;
+      return;
+    }
+    const logBox = $('log');
+    for (let i = lastLogCount; i < data.log.length; i++) {
+      logBox.textContent += data.log[i] + '\n';
+    }
+    lastLogCount = data.log.length;
+    logBox.scrollTop = logBox.scrollHeight;
+    const pct = data.total ? Math.round(data.done * 100 / data.total) : 0;
+    $('progressBar').style.width = pct + '%';
+    $('status').textContent = data.done + '/' + data.total + ' 完成，成功 ' + data.ok;
+    if (data.finished) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      jobId = null;
+      $('btnStart').disabled = false;
+      for (const f of data.files) {
+        const ix = queue.indexOf(f);
+        if (ix >= 0) queue.splice(ix, 1);
+      }
+      renderList();
+      $('status').textContent = data.ok + '/' + data.total + ' 个文件解压成功';
+      logLine(data.ok + '/' + data.total + ' 个文件解压成功');
+    }
+  } catch (err) {
+    logLine('状态查询异常: ' + err.message);
+    clearInterval(pollTimer);
+    pollTimer = null;
+    jobId = null;
+    $('btnStart').disabled = false;
+  }
+}
+
+$('btnAdd').addEventListener('click', async () => {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.pick_files) {
+    try {
+      const paths = await window.pywebview.api.pick_files();
+      addPaths(paths || []);
+    } catch (err) {
+      logLine('添加文件失败: ' + err.message);
+      $('fileInput').click();
+    }
+  } else {
+    $('fileInput').click();
+  }
+});
+$('fileInput').addEventListener('change', e => {
+  addFiles(e.target.files);
+  e.target.value = '';
+});
+$('btnClear').addEventListener('click', () => {
+  queue = [];
+  renderList();
+});
+$('btnStart').addEventListener('click', startExtract);
+
+let dragDepth = 0;
+window.addEventListener('dragenter', e => {
+  e.preventDefault();
+  dragDepth++;
+  $('dragOverlay').classList.add('show');
+});
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragleave', e => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) $('dragOverlay').classList.remove('show');
+});
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('dragOverlay').classList.remove('show');
+});
+
+$('panelOpacity').addEventListener('input', e => {
+  applyPanelOpacity(e.target.value);
+  saveConfig({panel_opacity: parseFloat(e.target.value)});
+});
+$('btnImportPw').addEventListener('click', async () => {
+  const pw = $('newPw').value;
+  if (!pw) {
+    logLine('请先粘贴新密码');
+    return;
+  }
+  const data = await api('/api/password', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  logLine(data.message || JSON.stringify(data));
+  if (data.added) {
+    $('newPw').value = '';
+  }
+});
+$('threads').addEventListener('change', e => saveConfig({threads: parseInt(e.target.value, 10)}));
+$('btnBg').addEventListener('click', () => $('bgInput').click());
+$('bgInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const res = await fetch('/api/background', {
+      method: 'POST',
+      body: reader.result
+    });
+    const data = await res.json();
+    if (data.url) {
+      document.body.style.backgroundImage = "url('" + data.url + "')";
+      document.body.classList.add('has-bg');
+    }
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';
+});
+
+window.addEventListener('resize', saveWindowState);
+window.addEventListener('move', saveWindowState);
+window.addEventListener('pagehide', saveWindowState);
+
+api('/api/config').then(applyConfig);
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+.workbuddy/
+refs/
+passwords.txt
+data/hot_passwords.txt
+backgrounds/

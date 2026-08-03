@@ -1,0 +1,661 @@
+[
+  {
+    "name": "exfat",
+    "patterns": [
+      [
+        {
+          "pos": 3,
+          "hex": "4558464154202020"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "encase e01/s01",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "455646090d0aff00"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "encase ex01",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "455646320d0a8100"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "encase l01",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4c5646090d0aff00"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "encase lx01",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4c4546320d0a8100"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "ftk ad1",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "41445345474d454e54454446494c4500"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "aff",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "41464631300d0a00"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "whx",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "574858204261636b75702076312e3000"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "ciso/cso",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4349534f"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "chd",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4d436f6d70724844"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "ecm",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "45434d00"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "isz",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "49735a21"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "alcohol mds",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4d454449412044455343524950544f52"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "clonecd ccd",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "5b436c6f6e6543445d"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "zisofs",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "37e45396c9dbd607"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "tnef",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "789f3e22"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "dbx",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "cfad12fe"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "warc",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "574152432f"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "binhex",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "28546869732066696c65206d75737420626520636f6e766572746564"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "yenc",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "3d79626567696e"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "tbb",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "20067919080c0000"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "macbinary",
+    "patterns": [
+      [
+        {
+          "pos": 102,
+          "hex": "6d42494e"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "lz4",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "04224d18"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "lz5",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "05224d18"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "lizard",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "06224d18"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "mozlz4",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "6d6f7a4c7a343000"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "chrome pak",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "0500000000000000"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "0500000001000000"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "0500000002000000"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "asar archive (electron)",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "04000000"
+        },
+        {
+          "pos": 16,
+          "hex": "7b2266696c657322"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "7-zip",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "377abcaf271c"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "cpio",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "c771"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "71c7"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "303730373037"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "303730373031"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "303730373032"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "arj",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "60ea"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "lzh",
+    "patterns": [
+      [
+        {
+          "pos": 2,
+          "hex": "2d6c68"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "chm",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "49545346"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "qcow2",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "514649fb"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "vhdx",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "7668647866696c65"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "vmdk",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4b444d56"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "vdi",
+    "patterns": [
+      [
+        {
+          "pos": 64,
+          "hex": "7f10dabe"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "wim",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4d5357494d000000"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "apfs",
+    "patterns": [
+      [
+        {
+          "pos": 32,
+          "hex": "4e585342"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "xar",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "78617221"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "uefi",
+    "patterns": [
+      [
+        {
+          "pos": 40,
+          "hex": "5f465648"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "ntfs",
+    "patterns": [
+      [
+        {
+          "pos": 3,
+          "hex": "4e544653"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "efigpt",
+    "patterns": [
+      [
+        {
+          "pos": 512,
+          "hex": "4546492050415254"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "ace compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 7,
+          "hex": "2a2a4143452a2a"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "alzip compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "414c5a01"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "freearc compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "41724301"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "bcm compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "42434d21"
+        }
+      ],
+      [
+        {
+          "pos": 0,
+          "hex": "42434d32"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "dgca digital g codec archiver",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "44474341"
+        },
+        {
+          "pos": 32,
+          "hex": "44415441"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "egg compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "454747410001"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "kgb archiver compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4b47425f61726368202d"
+        },
+        {
+          "pos": 11,
+          "hex": "0d0a"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "lzip compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "4c5a4950"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "pea compressed archive (v1.x)",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "ea01"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "rar compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "526172211a"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "uharc compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "554841"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "zpaq compressed archive",
+    "patterns": [
+      [
+        {
+          "pos": 0,
+          "hex": "376b5374"
+        }
+      ]
+    ]
+  }
+]
