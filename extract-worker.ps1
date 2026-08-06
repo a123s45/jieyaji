@@ -15,7 +15,7 @@ function Write-Log([string]$m) {
     if ($LogFile) {
         Add-Content -LiteralPath $LogFile -Value $m -Encoding UTF8
     } else {
-        Write-Output $m
+        [System.Console]::Out.WriteLine($m)
     }
 }
 
@@ -103,6 +103,9 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
     $psi.Arguments = 'e -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
     if ($pw -ne '') {
         $psi.Arguments += ' -p' + (Quote-Arg $pw)
+    } else {
+        # -p- : never prompt for a password (no GUI dialog, fail fast on encrypted archives)
+        $psi.Arguments += ' -p-'
     }
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
@@ -131,17 +134,51 @@ function Test-Password7z([string]$file, [string]$pw) {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardInput = $true
-    $psi.Arguments = 't ' + (Quote-Arg ('-p' + $pw)) + ' -y ' + (Quote-Arg $file)
+    # 'l' (list) only reads the archive header: wrong password fails in ~0.1s,
+    # correct password succeeds instantly. 't' would do a full data verify
+    # (minutes on multi-GB volumes) and timeout before confirming the password.
+    $psi.Arguments = 'l ' + (Quote-Arg ('-p' + $pw)) + ' -y ' + (Quote-Arg $file)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
         Close-ProcStdin $p
-        if (-not $p.WaitForExit(60000)) {
+        if (-not $p.WaitForExit(300000)) {
             try { $p.Kill(); $p.WaitForExit() } catch {}
             return $false
         }
         return $p.ExitCode -eq 0
     } catch {
         Write-Log ("WARN 7z start failed (" + $SevenZip + "): " + $_.Exception.Message)
+        return $false
+    }
+}
+
+# Primary extractor once a password is known: 7z handles multi-volume
+# (.7z.001/.../rar parts) natively, which magic-extractor can't (it even
+# crashes on .001 identify). Falls through to magic-extractor/WinRAR below.
+function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $SevenZip
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = 'x -y -o' + (Quote-Arg $outDir) + ' ' + (Quote-Arg ('-p' + $pw)) + ' ' + (Quote-Arg $file)
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        if (-not $p.WaitForExit(1800000)) {
+            try { $p.Kill(); $p.WaitForExit() } catch {}
+            Stop-ProcessTree $p.Id
+            Write-Log 'WARN 7z extract timeout'
+            return $false
+        }
+        Stop-ProcessTree $p.Id
+        if ($p.ExitCode -eq 0) {
+            $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
+            if ($n -gt 0) { return $true }
+        }
+        return $false
+    } catch {
+        Write-Log ("WARN 7z extract start failed: " + $_.Exception.Message)
         return $false
     }
 }
@@ -435,13 +472,24 @@ try {
 
     $ok = $true
     if (-not $winrarOk) {
-        $ok = Invoke-MagicExtract $FilePath $temp $found
+        $ok = Invoke-7zExtract $FilePath $temp $found
         if (-not $ok) {
-            Write-Log 'Magic-extractor failed; trying WinRAR fallback (no password)...'
-            if (Invoke-WinRARExtract $FilePath $temp '') {
-                Write-Log 'OK extracted via WinRAR fallback (no password)'
-                $winrarOk = $true
-                $ok = $true
+            Write-Log '7z extract failed; trying magic-extractor...'
+            $ok = Invoke-MagicExtract $FilePath $temp $found
+            if (-not $ok) {
+                Write-Log 'Magic-extractor failed; trying WinRAR fallback (known password)...'
+                $ok = Invoke-WinRARExtract $FilePath $temp $found
+                if (-not $ok) {
+                    Write-Log 'WinRAR with password failed; trying WinRAR without password...'
+                    $ok = Invoke-WinRARExtract $FilePath $temp ''
+                    if ($ok) {
+                        Write-Log 'OK extracted via WinRAR fallback (no password)'
+                        $winrarOk = $true
+                    }
+                } else {
+                    Write-Log 'OK extracted via WinRAR fallback (with password)'
+                    $winrarOk = $true
+                }
             }
         }
     }
