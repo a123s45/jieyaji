@@ -70,6 +70,61 @@ function Invoke-MagicExtract([string]$file, [string]$outDir, [string]$pw) {
     }
 }
 
+function Find-WinRAR {
+    foreach ($key in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe'
+    )) {
+        try {
+            $p = (Get-ItemProperty -Path $key -ErrorAction Stop).'(default)'
+            if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+        } catch {}
+    }
+    foreach ($c in @((Join-Path $env:ProgramFiles 'WinRAR\WinRAR.exe'), (Join-Path ${env:ProgramFiles(x86)} 'WinRAR\WinRAR.exe'))) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    return ''
+}
+
+# Last-resort extractor: WinRAR's scanner tolerates broken zip central
+# directories that 7z/magic-extractor reject outright (e.g. MP4+ZIP64
+# polyglot where the zip EOCD points at garbage). Tries without password.
+function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
+    $wr = Find-WinRAR
+    if (-not $wr) {
+        Write-Log 'WARN WinRAR not found; skipping WinRAR fallback'
+        return $false
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $wr
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = 'e -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
+    if ($pw -ne '') {
+        $psi.Arguments += ' -p' + (Quote-Arg $pw)
+    }
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        if (-not $p.WaitForExit(600000)) {
+            try { $p.Kill(); $p.WaitForExit() } catch {}
+            Stop-ProcessTree $p.Id
+            Write-Log 'WARN WinRAR fallback timeout'
+            return $false
+        }
+        Stop-ProcessTree $p.Id
+        if ($p.ExitCode -le 1) {
+            $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
+            if ($n -gt 0) { return $true }
+        }
+        return $false
+    } catch {
+        Write-Log ('WARN WinRAR start failed: ' + $_.Exception.Message)
+        return $false
+    }
+}
+
 function Test-Password7z([string]$file, [string]$pw) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $SevenZip
@@ -235,10 +290,16 @@ function Detect-ArchiveExtension([string]$file) {
         $p = [System.Diagnostics.Process]::Start($psi)
         Close-ProcStdin $p
         $stdout = $p.StandardOutput.ReadToEnd()
-        $p.WaitForExit(30000)
+        $null = $p.WaitForExit(30000)
         foreach ($line in ($stdout -split "`r?`n")) {
             if ($line -match '^\s*Type\s*=\s*(\S+)') {
                 $t = $matches[1].ToLowerInvariant()
+                if ($t -like 'rar*') { return '.rar' }
+                if ($t -like 'zip*') { return '.zip' }
+                if ($t -like 'lzh*' -or $t -like 'lha*') { return '.lzh' }
+                if ($t -like 'bzip2*') { return '.bz2' }
+                if ($t -like 'gzip*') { return '.gz' }
+                if ($t -like 'zstd*') { return '.zst' }
                 if ($map.ContainsKey($t)) {
                     return $map[$t]
                 }
@@ -309,6 +370,7 @@ try {
     Write-Log ("OK loaded " + $attempts.Count + " password candidates (" + $hotPws.Count + " hot)")
 
     $found = $null
+    $winrarOk = $false
     $tryIndex = 0
     Write-Log 'Fast password test (in-process)...'
     $fast = Test-PasswordFast $FilePath $PasswordFile
@@ -334,6 +396,15 @@ try {
             break
         }
     }
+    }
+
+    if ($null -eq $found) {
+        Write-Log 'Trying WinRAR fallback (no password; tolerant scanner for broken-directory zip/polyglot)...'
+        if (Invoke-WinRARExtract $FilePath $temp '') {
+            Write-Log 'OK extracted via WinRAR fallback (no password)'
+            $found = ''
+            $winrarOk = $true
+        }
     }
 
     if ($null -eq $found -and $MagicFallback) {
@@ -362,7 +433,18 @@ try {
         exit 1
     }
 
-    $ok = Invoke-MagicExtract $FilePath $temp $found
+    $ok = $true
+    if (-not $winrarOk) {
+        $ok = Invoke-MagicExtract $FilePath $temp $found
+        if (-not $ok) {
+            Write-Log 'Magic-extractor failed; trying WinRAR fallback (no password)...'
+            if (Invoke-WinRARExtract $FilePath $temp '') {
+                Write-Log 'OK extracted via WinRAR fallback (no password)'
+                $winrarOk = $true
+                $ok = $true
+            }
+        }
+    }
     if (-not $ok) {
         Write-Log 'FAIL extraction failed'
         exit 1

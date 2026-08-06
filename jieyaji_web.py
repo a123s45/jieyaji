@@ -34,6 +34,7 @@ def load_config():
             'panel_color': '#ffffff',
             'panel_opacity': 0.5,
             'threads': 1,
+            'delete_source': False,
             'width': 960,
             'height': 640,
             'x': None,
@@ -288,8 +289,20 @@ class Api:
 
 def setup_close_save(window):
     save_timer = {'t': None}
+    state = {'maximized': False, 'minimized': False}
+    last = {'width': None, 'height': None, 'x': None, 'y': None}
+    try:
+        cfg = load_config()
+        last['width'] = cfg.get('width')
+        last['height'] = cfg.get('height')
+        last['x'] = cfg.get('x')
+        last['y'] = cfg.get('y')
+    except Exception:
+        pass
 
     def persist(width, height, x, y):
+        if width is None or height is None:
+            return
         try:
             cfg = load_config()
             cfg['width'] = int(width)
@@ -300,35 +313,63 @@ def setup_close_save(window):
         except Exception:
             pass
 
-    def debounced_save(*_args):
-        # window.get_size()/get_position() are authoritative; debounce to avoid spamming disk
-        try:
-            if save_timer['t'] is not None:
-                save_timer['t'].cancel()
-            def do_save():
-                try:
-                    size = window.get_size()
-                    pos = window.get_position()
-                    persist(size[0], size[1], pos[0], pos[1])
-                except Exception:
-                    pass
-            save_timer['t'] = threading.Timer(0.6, do_save)
-            save_timer['t'].daemon = True
-            save_timer['t'].start()
-        except Exception:
-            pass
+    def debounced_save(width, height, x, y):
+        if save_timer['t'] is not None:
+            save_timer['t'].cancel()
+
+        def do_save():
+            if state['maximized'] or state['minimized']:
+                return
+            persist(width, height, x, y)
+
+        save_timer['t'] = threading.Timer(0.6, do_save)
+        save_timer['t'].daemon = True
+        save_timer['t'].start()
+
+    def on_resized(*args):
+        if state['maximized'] or state['minimized']:
+            return
+        if len(args) >= 2:
+            last['width'] = int(args[0])
+            last['height'] = int(args[1])
+            debounced_save(last['width'], last['height'], last['x'], last['y'])
+
+    def on_moved(*args):
+        if state['maximized'] or state['minimized']:
+            return
+        if len(args) >= 2:
+            last['x'] = int(args[0])
+            last['y'] = int(args[1])
+            debounced_save(last['width'], last['height'], last['x'], last['y'])
+
+    def on_maximized(*_args):
+        state['maximized'] = True
+        state['minimized'] = False
+
+    def on_minimized(*_args):
+        state['minimized'] = True
+
+    def on_restored(*_args):
+        state['maximized'] = False
+        state['minimized'] = False
 
     def on_closing(*_args):
         try:
-            size = window.get_size()
-            pos = window.get_position()
-            persist(size[0], size[1], pos[0], pos[1])
+            if not state['maximized'] and not state['minimized']:
+                last['width'] = window.width
+                last['height'] = window.height
+                last['x'] = window.x
+                last['y'] = window.y
+            persist(last['width'], last['height'], last['x'], last['y'])
         except Exception:
             pass
 
     try:
-        window.events.resized += debounced_save
-        window.events.moved += debounced_save
+        window.events.resized += on_resized
+        window.events.moved += on_moved
+        window.events.maximized += on_maximized
+        window.events.minimized += on_minimized
+        window.events.restored += on_restored
     except Exception:
         pass
     window.events.closing += on_closing

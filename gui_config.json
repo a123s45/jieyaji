@@ -1,10 +1,11 @@
 {
   "background": "bg_20260803_213346.jpg",
   "panel_color": "#ffffff",
-  "panel_opacity": 0.25,
+  "panel_opacity": 0.15,
   "threads": 2,
-  "width": 1428,
-  "height": 764,
-  "x": 195,
-  "y": 238
+  "width": 1328,
+  "height": 772,
+  "x": 160,
+  "y": 232,
+  "delete_source": true
 }

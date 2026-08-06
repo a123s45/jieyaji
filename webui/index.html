@@ -344,19 +344,6 @@ function saveConfig(partial) {
   });
 }
 
-let saveTimer = null;
-function saveWindowState() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveConfig({
-      width: window.innerWidth,
-      height: window.innerHeight,
-      x: window.screenX,
-      y: window.screenY
-    });
-  }, 400);
-}
-
 function applyConfig(cfg) {
   if (cfg.background) {
     document.body.style.backgroundImage = "url('/backgrounds/" + cfg.background + "')";
@@ -368,6 +355,9 @@ function applyConfig(cfg) {
   }
   if (cfg.threads) {
     $('threads').value = String(cfg.threads);
+  }
+  if (typeof cfg.delete_source === 'boolean') {
+    $('deleteSource').checked = cfg.delete_source;
   }
 }
 
@@ -521,6 +511,7 @@ $('btnImportPw').addEventListener('click', async () => {
   }
 });
 $('threads').addEventListener('change', e => saveConfig({threads: parseInt(e.target.value, 10)}));
+$('deleteSource').addEventListener('change', e => saveConfig({delete_source: e.target.checked}));
 $('btnBg').addEventListener('click', () => $('bgInput').click());
 $('bgInput').addEventListener('change', e => {
   const file = e.target.files[0];
@@ -540,10 +531,6 @@ $('bgInput').addEventListener('change', e => {
   reader.readAsDataURL(file);
   e.target.value = '';
 });
-
-window.addEventListener('resize', saveWindowState);
-window.addEventListener('move', saveWindowState);
-window.addEventListener('pagehide', saveWindowState);
 
 api('/api/config').then(applyConfig);
 </script>
