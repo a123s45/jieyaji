@@ -163,6 +163,76 @@ function Test-Password7z([string]$file, [string]$pw) {
     }
 }
 
+# Encrypted zips list fine without a password ('l' succeeds with any password),
+# so Test-Password7z can't tell right from wrong. Verify by testing ONE entry
+# (fast: header + first entry data only). Returns $true when the password is
+# correct. First entry name is read from the listing output.
+function Test-ZipPasswordSingle([string]$file, [string]$pw) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $SevenZip
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardInput = $true
+    # 7z emits GBK on this system; without an explicit encoding the worker
+    # (no console) reads it as UTF-8 and entry paths become mojibake.
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(936)
+    $psi.Arguments = 'l -slt ' + (Quote-Arg $file)
+    $firstEntry = ''
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        $out = $p.StandardOutput.ReadToEnd()
+        $null = $p.WaitForExit(30000)
+        $firstEntry = ''
+        $curPath = ''
+        $curIsFolder = $false
+        $afterPath = ''
+        foreach ($ln in ($out -split "`r?`n")) {
+            if ($ln -match '^\s*Path\s*=\s*(.+)$') {
+                if ($curPath -ne '' -and -not $curIsFolder -and $firstEntry -eq '') {
+                    $firstEntry = $curPath
+                }
+                $curPath = $matches[1].Trim()
+                $curIsFolder = $false
+                $afterPath = 'path'
+            } elseif ($afterPath -eq 'path' -and $ln -match '^\s*Type\s*=') {
+                # this Path was the archive itself, not an entry
+                $curPath = ''
+            } elseif ($ln -match '^\s*Folder\s*=\s*([+\-])') {
+                $curIsFolder = ($matches[1] -eq '+')
+                $afterPath = 'folder'
+            }
+        }
+        if ($curPath -ne '' -and -not $curIsFolder -and $firstEntry -eq '') {
+            $firstEntry = $curPath
+        }
+    } catch {
+        return $false
+    }
+    if ($firstEntry -eq '') { return $false }
+    $psi2 = New-Object System.Diagnostics.ProcessStartInfo
+    $psi2.FileName = $SevenZip
+    $psi2.UseShellExecute = $false
+    $psi2.CreateNoWindow = $true
+    $psi2.RedirectStandardInput = $true
+    $psi2.RedirectStandardOutput = $true
+    $psi2.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(936)
+    $psi2.Arguments = 't ' + (Quote-Arg ('-p' + $pw)) + ' -y ' + (Quote-Arg $file) + ' ' + (Quote-Arg $firstEntry)
+    try {
+        $p2 = [System.Diagnostics.Process]::Start($psi2)
+        Close-ProcStdin $p2
+        $out2 = $p2.StandardOutput.ReadToEnd()
+        if (-not $p2.WaitForExit(60000)) {
+            try { $p2.Kill(); $p2.WaitForExit() } catch {}
+            return $false
+        }
+        return $p2.ExitCode -eq 0
+    } catch {
+        return $false
+    }
+}
+
 # Primary extractor once a password is known: 7z handles multi-volume
 # (.7z.001/.../rar parts) natively, which magic-extractor can't (it even
 # crashes on .001 identify). Falls through to magic-extractor/WinRAR below.
@@ -184,7 +254,11 @@ function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
             return $false
         }
         Stop-ProcessTree $p.Id
-        if ($p.ExitCode -eq 0) {
+        # exit 2 = warnings (e.g. encrypted entries without matching password,
+        # while plain entries were extracted) - still counts as success if output
+        # is non-empty. Broken-directory zip polyglots often mix one plain
+        # payload entry with AES decoys.
+        if ($p.ExitCode -le 2) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
             if ($n -gt 0) {
                 Write-Log ('OK 7z extract done: ' + $n + ' item(s) -> ' + $outDir)
@@ -393,6 +467,31 @@ function Detect-ArchiveExtension([string]$file) {
             }
         }
     } catch {}
+    # Broken-directory zip polyglots (MP4 head + zip payload with garbage CD):
+    # 7z sniffs the MP4 header and refuses, magic-extractor may crash. Detect
+    # the zip EOCD signature directly in the file tail as a cheap positive.
+    try {
+        $fs = [System.IO.File]::OpenRead($file)
+        try {
+            $len = $fs.Length
+            $tailLen = [int][Math]::Min([long]65536, $len)
+            $fs.Seek(-$tailLen, [System.IO.SeekOrigin]::End) | Out-Null
+            $buf = New-Object byte[] $tailLen
+            [void]$fs.Read($buf, 0, $tailLen)
+            for ($i = 0; $i -le $tailLen - 4; $i++) {
+                if ($buf[$i] -eq 0x50 -and $buf[$i+1] -eq 0x4B) {
+                    if (($buf[$i+2] -eq 0x05 -and $buf[$i+3] -eq 0x06) -or
+                        ($buf[$i+2] -eq 0x06 -and $buf[$i+3] -eq 0x06) -or
+                        ($buf[$i+2] -eq 0x07 -and $buf[$i+3] -eq 0x06)) {
+                        Write-Log 'OK detected zip payload (EOCD in tail)'
+                        return '.zip'
+                    }
+                }
+            }
+        } finally {
+            $fs.Close()
+        }
+    } catch {}
     try {
         $out = (& $MagicExe identify $file 2>&1 | Out-String)
         if ($out -match '(?i)\brar\b') { return '.rar' }
@@ -405,6 +504,45 @@ function Detect-ArchiveExtension([string]$file) {
 }
 
 $ArchiveExts = @('.rar', '.zip', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.tbz2', '.xz', '.zst', '.lz', '.lzh', '.lha', '.arj', '.cab', '.iso', '.wim', '.001', '.zpaq', '.ace', '.alz', '.egg', '.kgb', '.uha', '.arc', '.bcm', '.pea', '.dgc', '.msi', '.img')
+
+# Detect MP4/polyglot files that carry a broken-directory zip payload: 7z
+# sniffs the MP4 header and refuses to open, magic-extractor crashes on it.
+# We rebuild the central directory (scan local headers) into a temp copy that
+# 7z can open, then the normal password loop + extraction runs on the copy.
+# Returns the repaired path, or '' when not applicable/failed.
+function Repair-BrokenZip([string]$file) {
+    $py = 'C:\Python314\python.exe'
+    if (-not (Test-Path -LiteralPath $py)) { return '' }
+    $script = Join-Path $PSScriptRoot 'repair-broken-zip.py'
+    if (-not (Test-Path -LiteralPath $script)) { return '' }
+    $repaired = Join-Path $env:TEMP ('zh_repair_' + [guid]::NewGuid().ToString('N') + '.zip')
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $py
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = (Quote-Arg $script) + ' ' + (Quote-Arg $file) + ' ' + (Quote-Arg $repaired)
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        if (-not $p.WaitForExit(600000)) {
+            try { $p.Kill(); $p.WaitForExit() } catch {}
+            Write-Log 'WARN zip repair timeout'
+            return ''
+        }
+        if ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $repaired)) {
+            Write-Log ('OK repaired broken zip -> ' + $repaired)
+            return $repaired
+        }
+        Write-Log ('WARN zip repair failed (exit ' + $p.ExitCode + ')')
+        return ''
+    } catch {
+        Write-Log ('WARN zip repair start failed: ' + $_.Exception.Message)
+        return ''
+    }
+}
 
 $ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
 
@@ -512,6 +650,37 @@ try {
         }
     }
 
+    $repairedPath = ''
+    if ($null -eq $found) {
+        # Broken-directory zip polyglots (e.g. MP4 + zip with garbage CD) can't
+        # be opened by 7z at all: rebuild the central directory into a copy,
+        # then run the password loop + extraction against the copy.
+        Write-Log 'Password loop failed; trying zip repair (broken-directory polyglot)...'
+        $repairedPath = Repair-BrokenZip $FilePath
+        if ($repairedPath) {
+            Write-Log 'Testing passwords against repaired zip...'
+            $tryIndex = 0
+            foreach ($pw in $attempts) {
+                $tryIndex++
+                if (($tryIndex % 25) -eq 0) {
+                    Write-Log ("... repaired tried " + $tryIndex + "/" + $attempts.Count + " passwords")
+                }
+                if (Test-Password7z $repairedPath $pw) {
+                    $found = $pw
+                    Write-Log ("OK password matched (repaired): " + $pw)
+                    Save-HotPassword $pw
+                    break
+                }
+            }
+            if ($null -eq $found) {
+                # mixed archives (plain payload + encrypted decoys) list fine
+                # without a password; extracting with any candidate still works
+                $found = ''
+                Write-Log 'OK repaired zip opens without password (plain payload entry)'
+            }
+        }
+    }
+
     if ($null -eq $found -and $MagicFallback) {
         Write-Log '7z test did not match; trying magic-extractor fallback (SLOW, full extract per password)...'
         $tryIndex = 0
@@ -539,17 +708,22 @@ try {
     }
 
     $ok = $true
+    $extractTarget = $FilePath
+    if ($repairedPath) {
+        $extractTarget = $repairedPath
+        Write-Log ('extracting from repaired copy: ' + $extractTarget)
+    }
     if (-not $winrarOk) {
-        $ok = Invoke-7zExtract $FilePath $temp $found
+        $ok = Invoke-7zExtract $extractTarget $temp $found
         if (-not $ok) {
             Write-Log '7z extract failed; trying magic-extractor...'
-            $ok = Invoke-MagicExtract $FilePath $temp $found
+            $ok = Invoke-MagicExtract $extractTarget $temp $found
             if (-not $ok) {
                 Write-Log 'Magic-extractor failed; trying WinRAR fallback (known password)...'
-                $ok = Invoke-WinRARExtract $FilePath $temp $found
+                $ok = Invoke-WinRARExtract $extractTarget $temp $found
                 if (-not $ok) {
                     Write-Log 'WinRAR with password failed; trying WinRAR without password...'
-                    $ok = Invoke-WinRARExtract $FilePath $temp ''
+                    $ok = Invoke-WinRARExtract $extractTarget $temp ''
                     if ($ok) {
                         Write-Log 'OK extracted via WinRAR fallback (no password)'
                         $winrarOk = $true
@@ -575,6 +749,66 @@ try {
         Write-Log 'collapsing nested folder...'
         Collapse-Nested $final $base
         Write-Log 'OK collapse done'
+    }
+
+    # Recursively expand nested archives found inside the extracted output
+    # (e.g. the repaired polyglot yields 课件2815.zip, which itself is an
+    # archive that must be extracted again). Keeps going until no archives
+    # remain or depth limit is hit.
+    $nestDepth = 0
+    while ($nestDepth -lt 5) {
+        $nested = @(Get-ChildItem -LiteralPath $final -Force -File -ErrorAction SilentlyContinue |
+            Where-Object { $ArchiveExts -contains $_.Extension.ToLowerInvariant() })
+        if ($nested.Count -eq 0) { break }
+        $nestDepth++
+        Write-Log ("nested archives found: " + ($nested | ForEach-Object { $_.Name }) -join ', ')
+        foreach ($n in $nested) {
+            $nFile = $n.FullName
+            Write-Log ('extracting nested: ' + $nFile)
+            $nTemp = Join-Path $env:TEMP ('zh_nested_' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $nTemp -Force | Out-Null
+            $nOk = $false
+            $nPw = ''
+            # Encrypted zips: 'l' succeeds with any password, so verify a
+            # password by testing ONE entry (instant), then full extract.
+            # Plain archives extract directly with no password.
+            if (Test-ZipPasswordSingle $nFile '') {
+                $nPw = ''
+            } else {
+                foreach ($pw in $attempts) {
+                    if (Test-ZipPasswordSingle $nFile $pw) {
+                        $nPw = $pw
+                        Write-Log ("OK nested password matched: " + $pw)
+                        Save-HotPassword $pw
+                        break
+                    }
+                }
+            }
+            $nOk = Invoke-7zExtract $nFile $nTemp $nPw
+            if ($nOk) {
+                # encrypted entries failing leave 0-byte artifacts - treat as failure
+                $zeroBytes = @(Get-ChildItem -LiteralPath $nTemp -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { -not $_.PSIsContainer -and $_.Length -eq 0 })
+                if ($zeroBytes.Count -gt 0) {
+                    Write-Log ("WARN nested extract produced " + $zeroBytes.Count + " empty file(s), password may be wrong")
+                    $nOk = $false
+                }
+            }
+            if ($nOk) {
+                Move-Contents $nTemp $final
+                if ($Collapse) {
+                    Collapse-Nested $final ([System.IO.Path]::GetFileNameWithoutExtension($n.Name))
+                }
+                try { Remove-Item -LiteralPath $nFile -Force -ErrorAction SilentlyContinue } catch {}
+                Write-Log ('OK nested extracted and removed: ' + $nFile)
+            } else {
+                Write-Log ('WARN nested extract failed, kept as-is: ' + $nFile)
+            }
+            try { Remove-Item -LiteralPath $nTemp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    if ($nestDepth -ge 5) {
+        Write-Log 'WARN nested extraction depth limit reached'
     }
     Write-Log ("DONE " + $final)
     if ($DeleteSource -and (Test-Path -LiteralPath $FilePath)) {
