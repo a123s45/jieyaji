@@ -52,6 +52,7 @@ function Invoke-MagicExtract([string]$file, [string]$outDir, [string]$pw) {
     if ($pw -ne '') {
         $psi.Arguments += ' --password ' + (Quote-Arg $pw)
     }
+    Write-Log ('magic-extractor extracting: ' + $file)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
         Close-ProcStdin $p
@@ -63,6 +64,11 @@ function Invoke-MagicExtract([string]$file, [string]$outDir, [string]$pw) {
         }
         $code = $p.ExitCode
         Stop-ProcessTree $p.Id
+        if ($code -eq 0) {
+            Write-Log ('OK magic-extractor extract done -> ' + $outDir)
+        } else {
+            Write-Log ('WARN magic-extractor extract failed (exit ' + $code + '): ' + $file)
+        }
         return $code -eq 0
     } catch {
         Write-Log ("WARN magic-extractor start failed: " + $_.Exception.Message)
@@ -108,6 +114,7 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
         $psi.Arguments += ' -p-'
     }
     try {
+        Write-Log ('WinRAR extracting (tolerant scanner): ' + $file)
         $p = [System.Diagnostics.Process]::Start($psi)
         Close-ProcStdin $p
         if (-not $p.WaitForExit(600000)) {
@@ -119,8 +126,12 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
         Stop-ProcessTree $p.Id
         if ($p.ExitCode -le 1) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
-            if ($n -gt 0) { return $true }
+            if ($n -gt 0) {
+                Write-Log ('OK WinRAR extract done: ' + $n + ' item(s) -> ' + $outDir)
+                return $true
+            }
         }
+        Write-Log ('WARN WinRAR extract failed (exit ' + $p.ExitCode + '): ' + $file)
         return $false
     } catch {
         Write-Log ('WARN WinRAR start failed: ' + $_.Exception.Message)
@@ -162,6 +173,7 @@ function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardInput = $true
     $psi.Arguments = 'x -y -o' + (Quote-Arg $outDir) + ' ' + (Quote-Arg ('-p' + $pw)) + ' ' + (Quote-Arg $file)
+    Write-Log ('extracting with 7z (may take minutes): ' + $file)
     try {
         $p = [System.Diagnostics.Process]::Start($psi)
         Close-ProcStdin $p
@@ -174,8 +186,12 @@ function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
         Stop-ProcessTree $p.Id
         if ($p.ExitCode -eq 0) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
-            if ($n -gt 0) { return $true }
+            if ($n -gt 0) {
+                Write-Log ('OK 7z extract done: ' + $n + ' item(s) -> ' + $outDir)
+                return $true
+            }
         }
+        Write-Log ('WARN 7z extract failed (exit ' + $p.ExitCode + '): ' + $file)
         return $false
     } catch {
         Write-Log ("WARN 7z extract start failed: " + $_.Exception.Message)
@@ -257,9 +273,9 @@ function Save-HotPassword([string]$pw) {
 }
 
 function Read-PasswordList([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return @() }
-    $lines = [System.IO.File]::ReadAllLines($path)
     $attempts = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $path)) { return ,$attempts }
+    $lines = [System.IO.File]::ReadAllLines($path)
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($l in $lines) {
         if ($null -eq $l) { continue }
@@ -267,7 +283,8 @@ function Read-PasswordList([string]$path) {
         $t = $l.Trim()
         if ($t -ne '' -and $t -ne $l -and $seen.Add($t)) { $attempts.Add($t) }
     }
-    return $attempts
+    # comma = no-unwrap: an empty list must stay a List, not become $null
+    return ,$attempts
 }
 
 function Move-Contents([string]$src, [string]$dst) {
@@ -305,6 +322,39 @@ function Resolve-OutputDir([string]$file) {
         $n++
     }
     return $candidate
+}
+
+# Delete a file permanently with retries (returns $true on success).
+# Recycle-bin moves of multi-GB volumes copy the data to C:\$Recycle.Bin and
+# take minutes (or hang on locks); an unlink is instant and reliable.
+function Remove-File([string]$path) {
+    for ($i = 1; $i -le 6; $i++) {
+        try {
+            [System.IO.File]::Delete($path)
+            return $true
+        } catch {
+            if (-not (Test-Path -LiteralPath $path)) {
+                return $true
+            }
+            Start-Sleep -Seconds 1
+        }
+    }
+    return $false
+}
+
+# Sibling volumes of the same archive (e.g. 第1章.7z.001 -> .002..009,
+# archive.part1.rar -> .part2+.rar). Empty when the file has no split siblings.
+function Get-VolumeSiblings([string]$file) {
+    $dir = Split-Path $file -Parent
+    $leaf = Split-Path $file -Leaf
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($file)
+    $pat = ''
+    if ($leaf -match '\.\d{3}$') { $pat = '^' + [regex]::Escape($base) + '\.\d{3}$' }
+    elseif ($leaf -match '\.part(\d+)\.rar$') { $pat = '^' + [regex]::Escape($base) + '\.part\d+\.rar$' }
+    if (-not $pat) { return @() }
+    return @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not $_.PSIsContainer -and $_.Name -match $pat -and $_.FullName -ne $file } |
+        ForEach-Object { $_.FullName })
 }
 
 function Detect-ArchiveExtension([string]$file) {
@@ -356,10 +406,28 @@ function Detect-ArchiveExtension([string]$file) {
 
 $ArchiveExts = @('.rar', '.zip', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.tbz2', '.xz', '.zst', '.lz', '.lzh', '.lha', '.arj', '.cab', '.iso', '.wim', '.001', '.zpaq', '.ace', '.alz', '.egg', '.kgb', '.uha', '.arc', '.bcm', '.pea', '.dgc', '.msi', '.img')
 
+$ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+
+# Multi-volume non-first parts (.002~.999 / .part2+.rar / .r00+ / .z01+) can't
+# be extracted alone. Users drop them only so the group gets cleaned up after the
+# first volume finishes (the first-volume worker deletes the whole group).
+# NOTE: must run BEFORE creating $temp - exiting here bypasses the try/finally.
+$name = Split-Path $FilePath -Leaf
+$isVol = $false
+$isFirstVol = $false
+if ($ext -match '^\.\d{3}$') { $isVol = $true; $isFirstVol = ($ext -eq '.001') }
+elseif ($name -match '\.part(\d+)\.rar$') { $isVol = $true; $isFirstVol = ($matches[1] -eq '1') }
+elseif ($name -match '\.r\d\d$') { $isVol = $true }
+elseif ($name -match '\.z\d\d$') { $isVol = $true }
+if ($isVol -and -not $isFirstVol) {
+    Write-Log ('SKIP non-first volume (cannot extract alone): ' + $FilePath)
+    Write-Log 'SKIP the first volume (.001/.part1.rar) does the extraction and deletes the whole group'
+    exit 0
+}
+
 $base = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
 $temp = Join-Path $env:TEMP ('zh_extract_' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp -Force | Out-Null
-$ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
 
 if (-not ($ArchiveExts -contains $ext)) {
     Write-Log ("OK detecting real format: " + $FilePath)
@@ -500,38 +568,27 @@ try {
 
     $final = Resolve-OutputDir $FilePath
     New-Item -ItemType Directory -Path $final -Force | Out-Null
+    Write-Log ('moving extracted files to output (may take a while): ' + $final)
     Move-Contents $temp $final
+    Write-Log ('OK moved to ' + $final)
     if ($Collapse) {
+        Write-Log 'collapsing nested folder...'
         Collapse-Nested $final $base
+        Write-Log 'OK collapse done'
     }
     Write-Log ("DONE " + $final)
     if ($DeleteSource -and (Test-Path -LiteralPath $FilePath)) {
-        $deleted = $false
-        $lastErr = ''
-        for ($i = 1; $i -le 6; $i++) {
-            try {
-                Add-Type -AssemblyName Microsoft.VisualBasic
-                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
-                    $FilePath,
-                    'OnlyErrorDialogs',
-                    'SendToRecycleBin'
-                )
-                $deleted = $true
-                break
-            } catch {
-                $lastErr = $_.Exception.Message
-                if (-not (Test-Path -LiteralPath $FilePath)) {
-                    # file is gone despite the exception (recycle-bin move quirks) - treat as success
-                    $deleted = $true
-                    break
-                }
-                Start-Sleep -Seconds 1
-            }
-        }
-        if ($deleted) {
+        if (Remove-File $FilePath) {
             Write-Log ('OK deleted source: ' + $FilePath)
+            foreach ($sib in (Get-VolumeSiblings $FilePath)) {
+                if (Remove-File $sib) {
+                    Write-Log ('OK deleted sibling volume: ' + $sib)
+                } else {
+                    Write-Log ('WARN delete sibling volume failed: ' + $sib)
+                }
+            }
         } else {
-            Write-Log ('WARN delete source failed after retries: ' + $lastErr)
+            Write-Log ('WARN delete source failed after retries: ' + $FilePath)
         }
     }
     exit 0

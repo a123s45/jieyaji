@@ -139,9 +139,49 @@ def run_worker(job, file_path):
         args.append('-DeleteSource')
     if job.get('magic_fallback'):
         args.append('-MagicFallback')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     try:
-        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=3600, creationflags=flags)
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, creationflags=flags)
+    except Exception as exc:
+        msg = 'FAIL worker start error: %s' % exc
+        with jobs_lock:
+            job['log'].append(msg)
+            job['done'] += 1
+            job['running'] -= 1
+        start_next(job)
+        return
+    # Live-tail the worker log so the UI shows progress while the worker
+    # is still running (extraction of multi-GB files takes minutes).
+    seen = 0
+    finished = threading.Event()
+
+    def tail_log():
+        nonlocal seen
+        while not finished.is_set():
+            try:
+                with open(log_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+                    lines = f.read().splitlines()
+                if len(lines) > seen:
+                    with jobs_lock:
+                        job['log'].extend(lines[seen:])
+                    seen = len(lines)
+            except Exception:
+                pass
+            time.sleep(0.5)
+        try:
+            with open(log_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+                lines = f.read().splitlines()
+            if len(lines) > seen:
+                with jobs_lock:
+                    job['log'].extend(lines[seen:])
+        except Exception:
+            pass
+
+    tail = threading.Thread(target=tail_log, daemon=True)
+    tail.start()
+    try:
+        proc.communicate(timeout=3600)
         ok = proc.returncode == 0
     except Exception as exc:
         ok = False
@@ -150,18 +190,14 @@ def run_worker(job, file_path):
                 f.write('FAIL worker error: %s\n' % exc)
         except Exception:
             pass
-    lines = []
-    try:
-        with open(log_path, 'r', encoding='utf-8-sig') as f:
-            lines = f.read().splitlines()
-    except Exception:
-        pass
+    finally:
+        finished.set()
+    tail.join(timeout=2)
     try:
         os.remove(log_path)
     except Exception:
         pass
     with jobs_lock:
-        job['log'].extend(lines)
         if ok:
             job['ok'] += 1
         job['done'] += 1
