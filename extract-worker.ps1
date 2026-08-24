@@ -106,12 +106,9 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardInput = $true
-    $psi.Arguments = 'e -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
+    $psi.Arguments = 'x -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
     if ($pw -ne '') {
         $psi.Arguments += ' -p' + (Quote-Arg $pw)
-    } else {
-        # -p- : never prompt for a password (no GUI dialog, fail fast on encrypted archives)
-        $psi.Arguments += ' -p-'
     }
     try {
         Write-Log ('WinRAR extracting (tolerant scanner): ' + $file)
@@ -124,6 +121,26 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
             return $false
         }
         Stop-ProcessTree $p.Id
+        if ($pw -eq '' -and $p.ExitCode -gt 1) {
+            $cntBefore = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
+            if ($cntBefore -eq 0) {
+                $psi2 = New-Object System.Diagnostics.ProcessStartInfo
+                $psi2.FileName = $wr
+                $psi2.UseShellExecute = $false
+                $psi2.CreateNoWindow = $true
+                $psi2.RedirectStandardInput = $true
+                $psi2.Arguments = 'x -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir) + ' -p-'
+                Write-Log 'WinRAR retry with -p- (no GUI)'
+                $p2 = [System.Diagnostics.Process]::Start($psi2)
+                Close-ProcStdin $p2
+                if (-not $p2.WaitForExit(60000)) { try { $p2.Kill(); $p2.WaitForExit() } catch {} }
+                Stop-ProcessTree $p2.Id
+                if ($p2.ExitCode -le 1) {
+                    $n2 = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
+                    if ($n2 -gt 0) { Write-Log ('OK WinRAR extract done: ' + $n2 + ' item(s) -> ' + $outDir); return $true }
+                }
+            }
+        }
         if ($p.ExitCode -le 1) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
             if ($n -gt 0) {
@@ -261,6 +278,16 @@ function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
         if ($p.ExitCode -le 2) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
             if ($n -gt 0) {
+                $allFiles = @(Get-ChildItem -LiteralPath $outDir -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer })
+                if ($allFiles.Count -gt 0) {
+                    $zero = @($allFiles | Where-Object { $_.Length -eq 0 }).Count
+                    if ($zero -gt 0 -and $zero -eq $allFiles.Count) {
+                        Write-Log 'WARN 7z extract all files 0 bytes (wrong password)'
+                        try { Remove-Item -LiteralPath $outDir -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path $outDir -Force | Out-Null } catch {}
+                        return $false
+                    }
+                    if ($zero -gt 0) { Write-Log ("WARN 7z extract produced " + $zero + " empty file(s)") }
+                }
                 Write-Log ('OK 7z extract done: ' + $n + ' item(s) -> ' + $outDir)
                 return $true
             }
@@ -333,17 +360,71 @@ function Get-HotPasswords {
     } catch { return @() }
 }
 
-function Save-HotPassword([string]$pw) {
-    if ($pw -eq '') { return }
-    $hot = Join-Path $PSScriptRoot 'data\hot_passwords.txt'
-    $lines = @($pw) + @(Get-HotPasswords | Where-Object { $_ -ne $pw })
-    if ($lines.Count -gt 50) { $lines = $lines[0..49] }
+function Add-ToPasswordBook([string]$pw) {
+    if ($pw -eq '' -or $pw -eq '__jieyaji_no_password__') { return }
+    $pwFile = 'D:\解压姬\passwords.txt'
+    for ($r = 0; $r -lt 3; $r++) {
+        try {
+            if (-not (Test-Path -LiteralPath $pwFile)) { return }
+            $fs = [System.IO.File]::Open($pwFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+            try {
+                $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+                $content = $sr.ReadToEnd()
+                $sr.Close()
+            } finally { $fs.Close() }
+            $lines = $content -split "`r?`n"
+            foreach ($l in $lines) { if ($l -eq $pw) { return } }
+            $enc = New-Object System.Text.UTF8Encoding($false)
+            for ($w = 0; $w -lt 3; $w++) {
+                try { [System.IO.File]::AppendAllText($pwFile, $pw + "`n", $enc); Write-Log ('OK added new password to book: ' + $pw); break } catch { Start-Sleep -Milliseconds 120 }
+            }
+            return
+        } catch { Start-Sleep -Milliseconds 120 }
+    }
+}
+
+$script:didSync = $false
+function Sync-Passwords {
+    param([switch]$Force)
+    if ($script:didSync -and -not $Force) { return }
+    $script:didSync = $true
+    $sync = Join-Path $PSScriptRoot 'sync-passwords.py'
+    if (-not (Test-Path -LiteralPath $sync)) { return }
+    $py = 'C:\Python314\python.exe'
+    if (-not (Test-Path -LiteralPath $py)) { $py = 'python' }
     try {
-        $dir = Split-Path $hot -Parent
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        $enc = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($hot, ($lines -join "`n") + "`n", $enc)
-    } catch {}
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $py
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardInput = $true
+        $psi.Arguments = Quote-Arg $sync
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        if (-not $p.WaitForExit(10000)) { try { $p.Kill(); $p.WaitForExit() } catch {} }
+        $out = $p.StandardOutput.ReadToEnd()
+        if ($out -and $out.Trim() -ne '') { Write-Log ('SYNC ' + $out.Trim()) }
+    } catch { Write-Log ('WARN sync failed: ' + $_.Exception.Message) }
+}
+
+function Save-HotPassword([string]$pw) {
+    if ($pw -eq '' -or $pw -eq '__jieyaji_no_password__') { return }
+    $hot = Join-Path $PSScriptRoot 'data\hot_passwords.txt'
+    for ($r = 0; $r -lt 3; $r++) {
+        try {
+            $lines = @($pw) + @(Get-HotPasswords | Where-Object { $_ -ne $pw })
+            if ($lines.Count -gt 50) { $lines = $lines[0..49] }
+            $dir = Split-Path $hot -Parent
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $enc = New-Object System.Text.UTF8Encoding($false)
+            $tmp = $hot + '.tmp'
+            [System.IO.File]::WriteAllText($tmp, ($lines -join "`n") + "`n", $enc)
+            Move-Item -LiteralPath $tmp -Destination $hot -Force
+            break
+        } catch { Start-Sleep -Milliseconds 120 }
+    }
+    Add-ToPasswordBook $pw
 }
 
 function Read-PasswordList([string]$path) {
@@ -373,14 +454,10 @@ function Collapse-Nested([string]$dir, [string]$baseName) {
         $dirs = @($children | Where-Object { $_.PSIsContainer })
         $files = @($children | Where-Object { -not $_.PSIsContainer })
         if ($files.Count -eq 0 -and $dirs.Count -eq 1) {
-            $innerName = $dirs[0].Name
-            $leaf = Split-Path $dir -Leaf
-            if ($innerName -eq $baseName -or $innerName -eq $leaf) {
-                $inner = $dirs[0].FullName
-                Move-Contents $inner $dir
-                [System.IO.Directory]::Delete($inner, $true)
-                continue
-            }
+            $inner = $dirs[0].FullName
+            Move-Contents $inner $dir
+            [System.IO.Directory]::Delete($inner, $true)
+            continue
         }
         break
     }
@@ -600,7 +677,7 @@ try {
     }
     $attempts = Read-PasswordList $PasswordFile
     if ($attempts.Count -eq 0) {
-        $attempts.Add('__jieyaji_no_password__')
+        $attempts.Add('')
     }
     $hotPws = Get-HotPasswords
     if ($hotPws.Count -gt 0) {
@@ -610,6 +687,7 @@ try {
         foreach ($p in $attempts) { if ($seenM.Add($p)) { $merged.Add($p) } }
         $attempts = $merged
     }
+    if (-not $attempts.Contains('')) { $attempts.Insert(0, '') }
     Write-Log ("OK loaded " + $attempts.Count + " password candidates (" + $hotPws.Count + " hot)")
 
     $found = $null
@@ -623,18 +701,32 @@ try {
             Write-Log 'OK password matched (fast): <no password>'
         } else {
             Write-Log ("OK password matched (fast): " + $found)
+            Save-HotPassword $found
         }
     }
     if ($null -eq $found) {
     Write-Log 'Testing passwords (7z test)...'
+    $isZip = ($ext -eq '.zip' -or $ext -eq '.001')
+    if ($isZip) {
+        try {
+            $tmpIsZip = (& $SevenZip l -slt $FilePath 2>&1 | Out-String) -match 'Type\s*=\s*zip'
+            if (-not $tmpIsZip) { $isZip = $false }
+        } catch { $isZip = $false }
+    }
     foreach ($pw in $attempts) {
         $tryIndex++
         if (($tryIndex % 25) -eq 0) {
             Write-Log ("... tried " + $tryIndex + "/" + $attempts.Count + " passwords")
         }
-        if (Test-Password7z $FilePath $pw) {
+        $okPw = $false
+        if ($isZip) {
+            $okPw = Test-ZipPasswordSingle $FilePath $pw
+        } else {
+            $okPw = Test-Password7z $FilePath $pw
+        }
+        if ($okPw) {
             $found = $pw
-            Write-Log ("OK password matched: " + $pw)
+            if ($pw -eq '') { Write-Log 'OK password matched: <no password>' } else { Write-Log ("OK password matched: " + $pw) }
             Save-HotPassword $pw
             break
         }
@@ -706,6 +798,9 @@ try {
         }
         exit 1
     }
+    if ($found -ne '' -and $found -ne '__jieyaji_no_password__') {
+        Sync-Passwords
+    }
 
     $ok = $true
     $extractTarget = $FilePath
@@ -740,15 +835,108 @@ try {
         exit 1
     }
 
-    $final = Resolve-OutputDir $FilePath
-    New-Item -ItemType Directory -Path $final -Force | Out-Null
-    Write-Log ('moving extracted files to output (may take a while): ' + $final)
-    Move-Contents $temp $final
-    Write-Log ('OK moved to ' + $final)
-    if ($Collapse) {
-        Write-Log 'collapsing nested folder...'
-        Collapse-Nested $final $base
-        Write-Log 'OK collapse done'
+    $tmpChildren = @(Get-ChildItem -LiteralPath $temp -Force -ErrorAction SilentlyContinue)
+    $final = ''
+    $finalIsFile = $false
+    if ($tmpChildren.Count -eq 0) {
+        Write-Log 'FAIL extracted content empty'
+        exit 1
+    } elseif ($tmpChildren.Count -eq 1) {
+        $single = $tmpChildren[0]
+        if ($single.PSIsContainer) {
+            $deepest = $single
+            $depth = 0
+            while ($depth -lt 20) {
+                $sub = @(Get-ChildItem -LiteralPath $deepest.FullName -Force -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
+                $dirs = @($sub | Where-Object { $_.PSIsContainer })
+                $files = @($sub | Where-Object { -not $_.PSIsContainer })
+                if ($files.Count -eq 0 -and $dirs.Count -eq 1) {
+                    $deepest = $dirs[0]
+                    $depth++
+                } else { break }
+            }
+            $parent = Split-Path $FilePath -Parent
+            $targetName = $deepest.Name
+            $candidate = Join-Path $parent $targetName
+            $n = 2
+            while (Test-Path -LiteralPath $candidate) {
+                $candidate = Join-Path $parent ($targetName + ' (' + $n + ')')
+                $n++
+            }
+            try {
+                Move-Item -LiteralPath $deepest.FullName -Destination $candidate -Force -ErrorAction Stop
+            } catch {
+                try {
+                    Copy-Item -LiteralPath $deepest.FullName -Destination $candidate -Recurse -Force -ErrorAction Stop
+                    Remove-Item -LiteralPath $deepest.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Log ('FAIL move deepest folder: ' + $_.Exception.Message)
+                    exit 1
+                }
+            }
+            $final = $candidate
+            Write-Log ('OK smart single folder -> ' + $final)
+        } else {
+            $parent = Split-Path $FilePath -Parent
+            $fName = $single.Name
+            $candidate = Join-Path $parent $fName
+            if (Test-Path -LiteralPath $candidate) {
+                $ext2 = [System.IO.Path]::GetExtension($fName)
+                $stem = [System.IO.Path]::GetFileNameWithoutExtension($fName)
+                $n = 2
+                while (Test-Path -LiteralPath $candidate) {
+                    $candidate = Join-Path $parent ($stem + ' (' + $n + ')' + $ext2)
+                    $n++
+                }
+            }
+            try {
+                Move-Item -LiteralPath $single.FullName -Destination $candidate -Force -ErrorAction Stop
+            } catch {
+                try {
+                    Copy-Item -LiteralPath $single.FullName -Destination $candidate -Force -ErrorAction Stop
+                    Remove-Item -LiteralPath $single.FullName -Force -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Log ('FAIL move single file: ' + $_.Exception.Message)
+                    exit 1
+                }
+            }
+            $final = $candidate
+            $finalIsFile = $true
+            Write-Log ('OK smart single file -> ' + $final)
+        }
+    } else {
+        $final = Resolve-OutputDir $FilePath
+        New-Item -ItemType Directory -Path $final -Force | Out-Null
+        Write-Log ('moving extracted files to output (may take a while): ' + $final)
+        Move-Contents $temp $final
+        Write-Log ('OK moved to ' + $final)
+        if ($Collapse) {
+            Write-Log 'collapsing nested folder...'
+            Collapse-Nested $final $base
+            Write-Log 'OK collapse done'
+        }
+    }
+
+    if ($finalIsFile -and ($ArchiveExts -contains ([System.IO.Path]::GetExtension($final).ToLowerInvariant()))) {
+        $nFile2 = $final
+        $nParent2 = Split-Path $nFile2 -Parent
+        $nTemp2 = Join-Path $env:TEMP ('zh_nested_' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $nTemp2 -Force | Out-Null
+        $nPw2 = ''
+        if (-not (Test-ZipPasswordSingle $nFile2 '')) {
+            foreach ($pw in $attempts) { if (Test-ZipPasswordSingle $nFile2 $pw) { $nPw2 = $pw; Write-Log ("OK nested password matched: " + $pw); Save-HotPassword $pw; break } }
+        }
+        $nOk2 = Invoke-7zExtract $nFile2 $nTemp2 $nPw2
+        if ($nOk2) {
+            $nFinal2 = Resolve-OutputDir $nFile2
+            New-Item -ItemType Directory -Path $nFinal2 -Force | Out-Null
+            Move-Contents $nTemp2 $nFinal2
+            try { Remove-Item -LiteralPath $nFile2 -Force -ErrorAction SilentlyContinue } catch {}
+            $final = $nFinal2
+            $finalIsFile = $false
+            Write-Log ('OK nested single-file extracted -> ' + $final)
+        }
+        try { Remove-Item -LiteralPath $nTemp2 -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }
 
     # Recursively expand nested archives found inside the extracted output
@@ -756,7 +944,7 @@ try {
     # archive that must be extracted again). Keeps going until no archives
     # remain or depth limit is hit.
     $nestDepth = 0
-    while ($nestDepth -lt 5) {
+    while (-not $finalIsFile -and $nestDepth -lt 5) {
         $nested = @(Get-ChildItem -LiteralPath $final -Force -File -ErrorAction SilentlyContinue |
             Where-Object { $ArchiveExts -contains $_.Extension.ToLowerInvariant() })
         if ($nested.Count -eq 0) { break }
@@ -810,6 +998,7 @@ try {
     if ($nestDepth -ge 5) {
         Write-Log 'WARN nested extraction depth limit reached'
     }
+    if ($found -ne '' -or $nestDepth -gt 0) { Sync-Passwords -Force }
     Write-Log ("DONE " + $final)
     if ($DeleteSource -and (Test-Path -LiteralPath $FilePath)) {
         if (Remove-File $FilePath) {

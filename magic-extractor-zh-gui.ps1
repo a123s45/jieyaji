@@ -439,14 +439,10 @@ function Collapse-Nested([string]$dir, [string]$baseName) {
         $dirs = @($children | Where-Object { $_.PSIsContainer })
         $files = @($children | Where-Object { -not $_.PSIsContainer })
         if ($files.Count -eq 0 -and $dirs.Count -eq 1) {
-            $innerName = $dirs[0].Name
-            $leaf = Split-Path $dir -Leaf
-            if ($innerName -eq $baseName -or $innerName -eq $leaf) {
-                $inner = $dirs[0].FullName
-                Move-Contents $inner $dir
-                [System.IO.Directory]::Delete($inner, $true)
-                continue
-            }
+            $inner = $dirs[0].FullName
+            Move-Contents $inner $dir
+            [System.IO.Directory]::Delete($inner, $true)
+            continue
         }
         break
     }
