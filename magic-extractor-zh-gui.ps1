@@ -688,6 +688,8 @@ $script:queueBox.Size = New-Object System.Drawing.Size(550, 180)
 $script:queueBox.AllowDrop = $true
 $script:queueBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $script:queueBox.ForeColor = [System.Drawing.Color]::FromArgb(30, 40, 55)
+$script:queueBox.Opacity = 220
+$script:queueBox.TintColor = [System.Drawing.Color]::White
 $script:queueBox.Anchor = 'Top,Left,Right'
 $script:form.Controls.Add($script:queueBox)
 $script:queueBox.add_ItemRemoved([Action[string]]{ param($path) $script:queue.Remove([string]$path) })
@@ -707,6 +709,8 @@ $script:logBox.Location = New-Object System.Drawing.Point(290, 326)
 $script:logBox.Size = New-Object System.Drawing.Size(550, 190)
 $script:logBox.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 $script:logBox.ForeColor = [System.Drawing.Color]::FromArgb(30, 40, 55)
+$script:logBox.Opacity = 220
+$script:logBox.TintColor = [System.Drawing.Color]::White
 $script:logBox.Anchor = 'Top,Left,Right,Bottom'
 $script:form.Controls.Add($script:logBox)
 
