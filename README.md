@@ -22,7 +22,7 @@
 
 - **密码遍历核心思路移植自 [BazzaCuda/Extractor](https://github.com/BazzaCuda/Extractor)**（GPLv3，Delphi）——进程内试密码、只解压包内最小文件验证密码、命中密码置顶（move-to-front）三招均来自其 `main.pas`。本仓库相应派生逻辑遵循 GPLv3。
 - **解压引擎使用 [xchwarze/magic-extractor](https://github.com/xchwarze/magic-extractor)**——按内容识别 80+ 格式的万能解压器（`magic-extractor.exe` 及其 `bin/` 下的各格式提取器均来自该项目）。
-- **7-Zip**（Igor Pavlov，LGPL）——`bin/extractors/7z/`，负责快速试密码与格式识别。
+- **7-Zip**（Igor Pavlov，LGPL）——`bin/extractors/7z/`（32 位，解压与回落试密码）、`bin/extractors/7z-x64/`（64 位内核，`arc7z.py` 用 ctypes 直接调它做进程内试密码）。
 - Python 依赖：pywebview、Flask、[py7zr](https://github.com/miurahr/py7zr)。
 
 ## 环境恢复

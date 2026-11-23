@@ -6,3 +6,7 @@ refs/
 passwords.txt
 data/hot_passwords.txt
 backgrounds/
+
+# local safety copies
+*.bak-*
+*.good-*

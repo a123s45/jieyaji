@@ -454,9 +454,12 @@ def start_next(job):
         job['index'] = idx + 1
         job['running'] += 1
         file_path = job['files'][idx]
-        # One lock per output identity: same-named archives extract one after
-        # another, everything else keeps running fully parallel.
-        key = norm_key(file_path)
+        # One lock per *output directory*, not per input file: a.zip and a.rar
+        # next to each other both resolve to <parent>\a, so keying on the file
+        # path gave each its own lock and serialised nothing. The worker's
+        # Resolve-OutputDir uses GetFileNameWithoutExtension on the same
+        # parent, which is exactly os.path.splitext()[0].
+        key = norm_key(os.path.splitext(file_path)[0])
         locks = job.setdefault('out_locks', {})
         lock = locks.get(key)
         if lock is None:

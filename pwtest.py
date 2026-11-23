@@ -23,6 +23,7 @@ from contextlib import contextmanager
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE, 'bin', 'pylibs'))
+sys.path.insert(0, BASE)
 
 HOT_FILE = os.path.join(BASE, 'data', 'hot_passwords.txt')
 HOT_LIMIT = 50
@@ -191,12 +192,51 @@ def try_7z(path, pw):
         return len(data) == best.uncompressed
 
 
+def _dll_find(archive, cands):
+    """Fastest path: 7z.dll in-process (see arc7z.py).
+
+    Returns ('found', pw) / ('nomatch', None) / ('unsupported', reason).
+    'nomatch' is a real answer; 'unsupported' means the caller must fall back
+    to the pure-python testers below.
+    """
+    try:
+        import arc7z
+    except Exception as exc:                       # missing dll, bad arch...
+        return 'unsupported', 'import arc7z: %s' % exc
+    try:
+        pw, stats = arc7z.find(archive, cands)
+    except Exception as exc:                       # never let the fast path break us
+        return 'unsupported', 'arc7z: %r' % (exc,)
+    if stats.get('unsupported'):
+        return 'unsupported', stats.get('reason') or stats.get('mode')
+    if pw is not None:
+        return 'found', pw
+    return 'nomatch', None
+
+
 def main():
     if len(sys.argv) < 3:
         print('UNSUPPORTED')
         return 2
     archive = sys.argv[1]
     pw_file = sys.argv[2]
+    cands = read_passwords(pw_file)
+
+    # 1) 7z.dll handles zip/zip-AES/7z/-mhe/rar/rar5 and rejects a wrong
+    #    password from the AES verifier in microseconds instead of spawning
+    #    7z.exe (37 ms) per candidate.
+    state, val = _dll_find(archive, cands)
+    if state == 'found':
+        sys.stdout.write('FOUND ' + base64.b64encode(val.encode('utf-8')).decode('ascii') + '\n')
+        sys.stdout.flush()
+        mark_hot(val)
+        return 0
+    if state == 'nomatch':
+        print('NOTFOUND')
+        return 1
+    sys.stderr.write('pwtest: dll path unavailable (%s), trying pure python\n' % val)
+
+    # 2) Pure python fallback (no native code involved).
     ext = os.path.splitext(archive)[1].lower()
     if ext == '.zip':
         tester = try_zip
@@ -206,7 +246,7 @@ def main():
         print('UNSUPPORTED')
         return 2
 
-    for pw in read_passwords(pw_file):
+    for pw in cands:
         try:
             r = tester(archive, pw)
         except UnsupportedScheme:
