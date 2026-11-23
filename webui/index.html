@@ -69,6 +69,7 @@ aside {
   flex-direction: column;
   gap: 10px;
   padding: 14px;
+  overflow-y: auto;       /* 窗口拉矮时侧栏可滚动，不会被切掉底部按钮 */
 }
 button {
   border: 1px solid rgba(47, 111, 235, 0.35);
@@ -110,25 +111,32 @@ main {
 }
 .section-title { font-size: 13px; font-weight: 700; color: #163a6b; margin-bottom: 8px; }
 .file-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;              /* 关键：允许自己收缩出滚动条 */
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding-right: 2px;
 }
+.file-list:empty { display: none; }   /* 空列表不占位，让拖放提示铺满 */
 .file-item {
-  padding: 8px 10px;
+  flex: 0 0 auto;             /* 关键：条目不许被压扁，多了就滚动 */
+  box-sizing: border-box;
+  padding: 7px 10px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.5);
   cursor: pointer;
   font-size: 13px;
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .file-item:hover { background: rgba(47, 111, 235, 0.12); }
 .drop-hint {
+  flex: 0 0 auto;
   border: 2px dashed rgba(47, 111, 235, 0.4);
   border-radius: 10px;
   padding: 14px;
@@ -136,6 +144,13 @@ main {
   color: var(--muted);
   font-size: 13px;
   margin-top: 8px;
+}
+.drop-hint.hidden { display: none; }   /* 列表有内容时收起来，别抢列表的高度 */
+.drop-hint.fill {                      /* 空列表时把剩余空间撑满并居中，不留大片空白 */
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 #log {
   flex: 1;
@@ -224,7 +239,7 @@ main {
       <section class="panel files-panel">
         <div class="section-title">文件列表（点击条目移除）</div>
         <div class="file-list" id="fileList"></div>
-        <div class="drop-hint">把文件或文件夹拖到这里</div>
+        <div class="drop-hint" id="dropHint">把文件或文件夹拖到这里</div>
       </section>
       <section class="panel log-panel">
         <div class="section-title">运行日志</div>
@@ -245,12 +260,13 @@ let queue = [];
 let jobId = null;
 let pollTimer = null;
 let lastLogCount = 0;
+let dragDepth = 0;
 
 function filePathOf(file) {
   return file.path || file.webkitRelativePath || '';
 }
 
-function renderList() {
+function renderList(scrollBottom) {
   const box = $('fileList');
   box.innerHTML = '';
   queue.forEach((p, i) => {
@@ -264,6 +280,25 @@ function renderList() {
     });
     box.appendChild(div);
   });
+  $('dropHint').classList.toggle('hidden', queue.length > 0);
+  $('dropHint').classList.toggle('fill', queue.length === 0);
+  if (scrollBottom) box.scrollTop = box.scrollHeight;
+}
+
+let dragTimer = null;
+
+function hideDragOverlay() {
+  clearTimeout(dragTimer);
+  dragTimer = null;
+  dragDepth = 0;
+  $('dragOverlay').classList.remove('show');
+}
+
+// 遮罩的看门狗：原生拖放被 pywebview 接管时 DOM 收不到 drop，遮罩会一直挂着，
+// 这里只要有一段时间没再收到 drag 事件就自己收起来。
+function armDragTimer() {
+  clearTimeout(dragTimer);
+  dragTimer = setTimeout(hideDragOverlay, 2500);
 }
 
 function addFiles(fileList) {
@@ -278,7 +313,8 @@ function addFiles(fileList) {
   if (added === 0) {
     logLine('未能读取文件路径，请从资源管理器拖拽文件到窗口内');
   }
-  renderList();
+  hideDragOverlay();
+  renderList(added > 0);
 }
 
 function addPaths(pathList) {
@@ -292,7 +328,8 @@ function addPaths(pathList) {
   if (added === 0) {
     logLine('未能读取文件路径，请使用“添加文件”按钮');
   }
-  renderList();
+  hideDragOverlay();
+  renderList(added > 0);
 }
 
 function pathsFromDrop(e) {
@@ -477,21 +514,34 @@ $('btnClear').addEventListener('click', () => {
 });
 $('btnStart').addEventListener('click', startExtract);
 
-let dragDepth = 0;
+function isFileDrag(e) {
+  const t = e.dataTransfer && e.dataTransfer.types;
+  if (!t) return false;
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] === 'Files' || t[i] === 'text/uri-list') return true;
+  }
+  return false;
+}
 window.addEventListener('dragenter', e => {
   e.preventDefault();
+  if (!isFileDrag(e)) return;          // 拖文字/图片不算，不弹遮罩
   dragDepth++;
   $('dragOverlay').classList.add('show');
+  armDragTimer();
 });
-window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragover', e => {
+  e.preventDefault();
+  // 拖放过程中 dragover 会持续触发，用来续期看门狗
+  if ($('dragOverlay').classList.contains('show')) armDragTimer();
+});
 window.addEventListener('dragleave', e => {
   dragDepth = Math.max(0, dragDepth - 1);
   if (dragDepth === 0) $('dragOverlay').classList.remove('show');
 });
+window.addEventListener('dragend', hideDragOverlay);
 window.addEventListener('drop', e => {
   e.preventDefault();
-  dragDepth = 0;
-  $('dragOverlay').classList.remove('show');
+  hideDragOverlay();
 });
 
 $('panelOpacity').addEventListener('input', e => {
@@ -536,6 +586,7 @@ $('bgInput').addEventListener('change', e => {
   e.target.value = '';
 });
 
+renderList();   // 初始化空态（让拖放提示铺满列表区）
 api('/api/config').then(applyConfig);
 </script>
 </body>
