@@ -109,6 +109,13 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
     $psi.Arguments = 'x -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir)
     if ($pw -ne '') {
         $psi.Arguments += ' -p' + (Quote-Arg $pw)
+    } else {
+        # '-p-' means "never ask for a password". Without it WinRAR pops its GUI
+        # password dialog on an encrypted archive and then simply sits there: the
+        # dialog cannot be answered (stdin is closed) and the call burns the full
+        # 10-minute timeout. With '-p-' it fails fast instead. The old fallback
+        # below could never fire, because a hung process never returns an exit code.
+        $psi.Arguments += ' -p-'
     }
     try {
         Write-Log ('WinRAR extracting (tolerant scanner): ' + $file)
@@ -121,26 +128,6 @@ function Invoke-WinRARExtract([string]$file, [string]$outDir, [string]$pw) {
             return $false
         }
         Stop-ProcessTree $p.Id
-        if ($pw -eq '' -and $p.ExitCode -gt 1) {
-            $cntBefore = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
-            if ($cntBefore -eq 0) {
-                $psi2 = New-Object System.Diagnostics.ProcessStartInfo
-                $psi2.FileName = $wr
-                $psi2.UseShellExecute = $false
-                $psi2.CreateNoWindow = $true
-                $psi2.RedirectStandardInput = $true
-                $psi2.Arguments = 'x -y -o+ ' + (Quote-Arg $file) + ' ' + (Quote-Arg $outDir) + ' -p-'
-                Write-Log 'WinRAR retry with -p- (no GUI)'
-                $p2 = [System.Diagnostics.Process]::Start($psi2)
-                Close-ProcStdin $p2
-                if (-not $p2.WaitForExit(60000)) { try { $p2.Kill(); $p2.WaitForExit() } catch {} }
-                Stop-ProcessTree $p2.Id
-                if ($p2.ExitCode -le 1) {
-                    $n2 = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
-                    if ($n2 -gt 0) { Write-Log ('OK WinRAR extract done: ' + $n2 + ' item(s) -> ' + $outDir); return $true }
-                }
-            }
-        }
         if ($p.ExitCode -le 1) {
             $n = @(Get-ChildItem -LiteralPath $outDir -Force -ErrorAction SilentlyContinue).Count
             if ($n -gt 0) {
@@ -180,10 +167,134 @@ function Test-Password7z([string]$file, [string]$pw) {
     }
 }
 
-# Encrypted zips list fine without a password ('l' succeeds with any password),
-# so Test-Password7z can't tell right from wrong. Verify by testing ONE entry
-# (fast: header + first entry data only). Returns $true when the password is
-# correct. First entry name is read from the listing output.
+# ---- Archive probe: one password-free listing, reused by every candidate ----
+#
+# 'l' reads only the archive header, so on archives whose header is PLAINTEXT
+# it succeeds no matter what password you pass. That is true for the vast
+# majority of rar password packs (WinRAR's '-p' encrypts data only; '-hp'
+# encrypts the header too) and for ordinary zips. Therefore 'l -p<pw>' can
+# NEVER validate a password there - it answered exit 0 to "", to a wrong
+# password and to the right one alike, and the caller happily concluded the
+# archive had no password.
+#
+# The same listing does tell us two useful things for free:
+#   * whether the header itself is encrypted (listing fails without a password)
+#   * which entries carry 'Encrypted = +', and which of them is smallest
+# so we list ONCE per archive and then verify each candidate against the
+# smallest ENCRYPTED entry with '7z t', which really touches data.
+# (Only encrypted entries qualify: mixed archives may hold plain decoys whose
+# data decrypts fine with any password and would validate a wrong one.)
+#
+# $script:ArcProbe keys:
+#   Ok              listing succeeded without a password
+#   HeaderEncrypted listing failed -> header needs a password (-hp rar, 7z -mhe)
+#   AnyEncrypted    at least one entry carries Encrypted = +
+#   MinEntry        smallest non-empty encrypted file entry (verification target)
+function Initialize-ArchiveProbe([string]$file) {
+    $script:ArcProbe = @{ Ok = $false; HeaderEncrypted = $false; AnyEncrypted = $false; MinEntry = '' }
+    if (-not (Test-Path -LiteralPath $SevenZip)) { return }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $SevenZip
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardInput = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(936)
+    $psi.Arguments = 'l -slt ' + (Quote-Arg $file)
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        $out = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(120000)) {
+            try { $p.Kill(); $p.WaitForExit() } catch {}
+            return
+        }
+        if ($p.ExitCode -ne 0) {
+            $script:ArcProbe.HeaderEncrypted = $true
+            return
+        }
+    } catch { return }
+    $script:ArcProbe.Ok = $true
+    # Single pass, no per-entry objects: resource packs with 100k+ entries are
+    # common enough that building and sorting a list of them would be wasteful.
+    $inEntries = $false
+    $curPath = ''
+    $curSize = [int64]0
+    $curIsFolder = $false
+    $curEnc = $false
+    $anyEnc = $false
+    $bestSize = [int64]0
+    $bestPath = ''
+    foreach ($ln in ($out -split "`r?`n")) {
+        if ($ln -match '^-{6,}') { $inEntries = $true; continue }
+        if (-not $inEntries) { continue }
+        if ($ln -match '^Path\s*=\s*(.*)$') {
+            if ($curEnc -and -not $curIsFolder -and $curSize -gt 0) {
+                $anyEnc = $true
+                if ($bestPath -eq '' -or $curSize -lt $bestSize) { $bestSize = $curSize; $bestPath = $curPath }
+            }
+            $curPath = $matches[1].Trim()
+            $curSize = [int64]0
+            $curIsFolder = $false
+            $curEnc = $false
+        } elseif ($ln -match '^Size\s*=\s*(\d+)') {
+            $curSize = [int64]$matches[1]
+        } elseif ($ln -match '^Folder\s*=\s*\+') {
+            $curIsFolder = $true
+        } elseif ($ln -match '^Encrypted\s*=\s*\+') {
+            $curEnc = $true
+        }
+    }
+    if ($curEnc -and -not $curIsFolder -and $curSize -gt 0) {
+        $anyEnc = $true
+        if ($bestPath -eq '' -or $curSize -lt $bestSize) { $bestSize = $curSize; $bestPath = $curPath }
+    }
+    $script:ArcProbe.AnyEncrypted = $anyEnc
+    $script:ArcProbe.MinEntry = $bestPath
+}
+
+# Validate one password candidate against an archive that Initialize-ArchiveProbe
+# has already listed. Returns $true when the password is right.
+function Test-ArchivePassword([string]$file, [string]$pw) {
+    if (-not $script:ArcProbe -or -not $script:ArcProbe.Ok) {
+        # Header is encrypted (or 7z is unavailable): here 'l' genuinely needs
+        # the password, and 'l -p<pw>' is both correct and cheap.
+        return (Test-Password7z $file $pw)
+    }
+    if (-not $script:ArcProbe.AnyEncrypted) {
+        # Nothing is encrypted: every password "works", only the empty one is
+        # meaningful. $attempts always starts with '', so this matches at once.
+        return ($pw -eq '')
+    }
+    if ($script:ArcProbe.MinEntry -eq '') {
+        return (Test-Password7z $file $pw)
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $SevenZip
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardInput = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(936)
+    # 't' with a single entry: a wrong password is rejected by the AES check
+    # value immediately, a right one decrypts just that one entry.
+    $psi.Arguments = 't ' + (Quote-Arg ('-p' + $pw)) + ' -y ' + (Quote-Arg $file) + ' ' + (Quote-Arg $script:ArcProbe.MinEntry)
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+        Close-ProcStdin $p
+        $null = $p.StandardOutput.ReadToEnd()
+        if (-not $p.WaitForExit(600000)) {
+            try { $p.Kill(); $p.WaitForExit() } catch {}
+            return $false
+        }
+        return $p.ExitCode -eq 0
+    } catch { return $false }
+}
+
+# SUPERSEDED by Initialize-ArchiveProbe + Test-ArchivePassword (2026-09-19):
+# kept only as a reference. Listed the archive once PER CANDIDATE, took the
+# first entry (a plain decoy in mixed archives validates any password) and
+# could not list header-encrypted archives at all.
 function Test-ZipPasswordSingle([string]$file, [string]$pw) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $SevenZip
@@ -362,7 +473,7 @@ function Get-HotPasswords {
 
 function Add-ToPasswordBook([string]$pw) {
     if ($pw -eq '' -or $pw -eq '__jieyaji_no_password__') { return }
-    $pwFile = 'D:\解压姬\passwords.txt'
+    $pwFile = Join-Path $PSScriptRoot 'passwords.txt'
     for ($r = 0; $r -lt 3; $r++) {
         try {
             if (-not (Test-Path -LiteralPath $pwFile)) { return }
@@ -461,6 +572,60 @@ function Collapse-Nested([string]$dir, [string]$baseName) {
         }
         break
     }
+}
+
+# Every staging directory this worker creates, so the final cleanup can wipe them
+# all no matter which code path was taken.
+$script:TempDirs = [System.Collections.Generic.List[string]]::new()
+
+# Create a staging dir on the SAME VOLUME as $nearPath. The whole pipeline is
+# "extract to staging, then move into place", and a cross-volume Move-Item is a
+# full copy+delete: on a 34GB archive that doubles the write I/O and can stall on
+# a slow source drive. Same volume turns the final move into an instant rename.
+# Tries the archive's own folder first, then the volume root, then %TEMP% only as
+# a last resort (keeps working on read-only parents / odd UNC shares).
+function New-SiblingTempDir([string]$nearPath, [string]$tag) {
+    $name = 'zh_' + $tag + '_' + [guid]::NewGuid().ToString('N')
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    try {
+        $full = [System.IO.Path]::GetFullPath($nearPath)
+        $parent = [System.IO.Path]::GetDirectoryName($full)
+        if ($parent -and (Test-Path -LiteralPath $parent)) {
+            $candidates.Add((Join-Path $parent ('.' + $name)))
+        }
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if ($root) { $candidates.Add((Join-Path $root $name)) }
+    } catch {}
+    if ($env:TEMP) { $candidates.Add((Join-Path $env:TEMP $name)) }
+    foreach ($c in $candidates) {
+        try {
+            New-Item -ItemType Directory -Path $c -Force -ErrorAction Stop | Out-Null
+            $script:TempDirs.Add($c)
+            $sameVol = $false
+            try {
+                $sameVol = ([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($nearPath))) -eq
+                           ([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($c)))
+            } catch {}
+            if ($sameVol) {
+                Write-Log ('staging dir (same volume): ' + $c)
+            } else {
+                Write-Log ('WARN staging dir on a DIFFERENT volume (cross-drive copy expected): ' + $c)
+            }
+            return $c
+        } catch {}
+    }
+    return ''
+}
+
+function Remove-AllTempDirs {
+    foreach ($d in $script:TempDirs) {
+        try {
+            if ($d -and (Test-Path -LiteralPath $d)) {
+                [System.IO.Directory]::Delete($d, $true)
+            }
+        } catch {}
+    }
+    $script:TempDirs.Clear()
 }
 
 function Resolve-OutputDir([string]$file) {
@@ -580,6 +745,80 @@ function Detect-ArchiveExtension([string]$file) {
     return ''
 }
 
+# Video containers that packs ship as "playable" polyglots: a valid MP4/MKV
+# that plays fine, with a ZIP payload appended. This disguise cannot carry a
+# password (players must be able to read it without prompting), so the password
+# loop is pure waste here - alias it to .zip and let WinRAR's tolerant scanner
+# walk the local headers.
+$VideoExts = @('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.m4v', '.webm', '.ts', '.mpg', '.mpeg', '.rmvb', '.rm', '.3gp', '.vob')
+
+# Cheap content probe: does this file carry a zip payload? Appended-zip
+# polyglots keep the EOCD record at the very end of the file, so scanning the
+# last 64KB is a reliable positive; the head is checked for a local header too.
+function Test-ZipPayload([string]$file) {
+    try {
+        $fs = [System.IO.File]::OpenRead($file)
+        try {
+            $len = $fs.Length
+            if ($len -lt 22) { return $false }
+            $headLen = [int][Math]::Min([long]65536, $len)
+            $head = New-Object byte[] $headLen
+            [void]$fs.Read($head, 0, $headLen)
+            $hasLocal = $false
+            for ($i = 0; $i -le $headLen - 4; $i++) {
+                if ($head[$i] -eq 0x50 -and $head[$i+1] -eq 0x4B -and
+                    $head[$i+2] -eq 0x03 -and $head[$i+3] -eq 0x04) { $hasLocal = $true; break }
+            }
+            $tailLen = [int][Math]::Min([long]65536, $len)
+            $fs.Seek(-$tailLen, [System.IO.SeekOrigin]::End) | Out-Null
+            $tail = New-Object byte[] $tailLen
+            [void]$fs.Read($tail, 0, $tailLen)
+            for ($i = 0; $i -le $tailLen - 4; $i++) {
+                if ($tail[$i] -eq 0x50 -and $tail[$i+1] -eq 0x4B -and
+                    $tail[$i+2] -eq 0x05 -and $tail[$i+3] -eq 0x06) { return $true }
+            }
+            return $hasLocal
+        } finally { $fs.Close() }
+    } catch { return $false }
+}
+
+# Create a .zip alias for the polyglot. A hardlink is instant and costs no
+# disk space (the worker and the source are on the same volume because the
+# staging dir is a sibling); fall back to a real copy when hardlinks are not
+# supported by the filesystem.
+function New-ZipAlias([string]$file, [string]$dir) {
+    if (-not $dir) { return '' }
+    $alias = Join-Path $dir ('polyglot_' + [guid]::NewGuid().ToString('N') + '.zip')
+    try {
+        New-Item -ItemType HardLink -Path $alias -Target $file -ErrorAction Stop | Out-Null
+        return $alias
+    } catch {}
+    try {
+        [System.IO.File]::Copy($file, $alias, $true)
+        return $alias
+    } catch {}
+    return ''
+}
+
+# Output sanity check used before deleting a source file: an extraction that
+# produced nothing (or only 0-byte decoys from a wrong password) must never
+# cost the user the source archive.
+function Get-OutputStat([string]$path) {
+    $files = 0
+    $bytes = [long]0
+    try {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $fi = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            return @{ Files = 1; Bytes = [long]$fi.Length }
+        }
+        foreach ($f in (Get-ChildItem -LiteralPath $path -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+            $files++
+            $bytes += [long]$f.Length
+        }
+    } catch {}
+    return @{ Files = $files; Bytes = $bytes }
+}
+
 $ArchiveExts = @('.rar', '.zip', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.tbz2', '.xz', '.zst', '.lz', '.lzh', '.lha', '.arj', '.cab', '.iso', '.wim', '.001', '.zpaq', '.ace', '.alz', '.egg', '.kgb', '.uha', '.arc', '.bcm', '.pea', '.dgc', '.msi', '.img')
 
 # Detect MP4/polyglot files that carry a broken-directory zip payload: 7z
@@ -592,7 +831,9 @@ function Repair-BrokenZip([string]$file) {
     if (-not (Test-Path -LiteralPath $py)) { return '' }
     $script = Join-Path $PSScriptRoot 'repair-broken-zip.py'
     if (-not (Test-Path -LiteralPath $script)) { return '' }
-    $repaired = Join-Path $env:TEMP ('zh_repair_' + [guid]::NewGuid().ToString('N') + '.zip')
+    $repairDir = New-SiblingTempDir $file 'repair'
+    if (-not $repairDir) { Write-Log 'WARN repair staging dir unavailable'; return '' }
+    $repaired = Join-Path $repairDir ('repaired_' + [guid]::NewGuid().ToString('N') + '.zip')
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $py
     $psi.UseShellExecute = $false
@@ -641,10 +882,24 @@ if ($isVol -and -not $isFirstVol) {
 }
 
 $base = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
-$temp = Join-Path $env:TEMP ('zh_extract_' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $temp -Force | Out-Null
 
-if (-not ($ArchiveExts -contains $ext)) {
+# Playable-mp4 polyglot: probe the content BEFORE any rename. The old flow
+# renamed the user's video in place to "name.zip" - a failed extraction then
+# left it stuck under a new name. Keep the original path untouched instead and
+# build a .zip alias in staging; the source is deleted only after verification.
+$isVideoExt = $VideoExts -contains $ext
+$polyglotZip = $false
+if ($isVideoExt) {
+    $polyglotZip = Test-ZipPayload $FilePath
+    if ($polyglotZip) {
+        Write-Log ("OK zip payload inside video container (" + $ext + "): alias to .zip + WinRAR")
+        Write-Log 'note: this playable polyglot cannot be password-encrypted - password loop will be skipped'
+    } else {
+        Write-Log ("OK video container (" + $ext + "): no zip payload found")
+    }
+}
+
+if (-not ($ArchiveExts -contains $ext) -and -not $polyglotZip) {
     Write-Log ("OK detecting real format: " + $FilePath)
     $detected = Detect-ArchiveExtension $FilePath
     if ($detected) {
@@ -665,16 +920,40 @@ if (-not ($ArchiveExts -contains $ext)) {
     }
 }
 
-if ($ArchiveExts -contains $ext) {
+if ($polyglotZip) {
+    Write-Log 'OK mp4 polyglot: zip mode, no password possible'
+} elseif ($ArchiveExts -contains $ext) {
     Write-Log ("OK normal archive ($ext): start password loop")
 } else {
     Write-Log ("OK non-archive extension ($ext): detect content")
 }
 
+# Created here (not earlier) so the try/finally below always owns its cleanup.
+$temp = New-SiblingTempDir $FilePath 'extract'
+if (-not $temp) { Write-Log 'FAIL could not create staging directory'; exit 1 }
+
 try {
     if (-not (Test-Path -LiteralPath $SevenZip)) {
         Write-Log ("WARN 7z not found: " + $SevenZip + " (7z fast path disabled)")
     }
+
+    # mp4 polyglot: hardlink the source as *.zip in its own staging dir (kept
+    # apart from $temp so the alias never gets mistaken for extracted content).
+    $polyglotAlias = ''
+    if ($polyglotZip) {
+        $aliasDir = New-SiblingTempDir $FilePath 'zipalias'
+        if ($aliasDir) {
+            $polyglotAlias = New-ZipAlias $FilePath $aliasDir
+            if ($polyglotAlias) {
+                Write-Log ('OK mp4 -> .zip alias: ' + $polyglotAlias)
+            } else {
+                Write-Log 'WARN could not create .zip alias; will try the original file'
+            }
+        } else {
+            Write-Log 'WARN alias staging dir unavailable'
+        }
+    }
+
     $attempts = Read-PasswordList $PasswordFile
     if ($attempts.Count -eq 0) {
         $attempts.Add('')
@@ -693,6 +972,12 @@ try {
     $found = $null
     $winrarOk = $false
     $tryIndex = 0
+    if ($polyglotZip) {
+        # Playable mp4 polyglots cannot carry a password: the player has to read
+        # the payload without prompting. Skip the candidate loop entirely.
+        $found = ''
+        Write-Log 'mp4 polyglot: password loop skipped'
+    } else {
     Write-Log 'Fast password test (in-process)...'
     $fast = Test-PasswordFast $FilePath $PasswordFile
     if ($null -ne $fast) {
@@ -706,30 +991,26 @@ try {
     }
     if ($null -eq $found) {
     Write-Log 'Testing passwords (7z test)...'
-    $isZip = ($ext -eq '.zip' -or $ext -eq '.001')
-    if ($isZip) {
-        try {
-            $tmpIsZip = (& $SevenZip l -slt $FilePath 2>&1 | Out-String) -match 'Type\s*=\s*zip'
-            if (-not $tmpIsZip) { $isZip = $false }
-        } catch { $isZip = $false }
+    Initialize-ArchiveProbe $FilePath
+    if (-not $script:ArcProbe.Ok) {
+        Write-Log 'probe: header is encrypted (listing needs a password) - validating with 7z l -p'
+    } elseif (-not $script:ArcProbe.AnyEncrypted) {
+        Write-Log 'probe: no encrypted entries (plain archive) - no password needed'
+    } else {
+        Write-Log ('probe: encrypted entries present, verifying against smallest one: ' + $script:ArcProbe.MinEntry)
     }
     foreach ($pw in $attempts) {
         $tryIndex++
         if (($tryIndex % 25) -eq 0) {
             Write-Log ("... tried " + $tryIndex + "/" + $attempts.Count + " passwords")
         }
-        $okPw = $false
-        if ($isZip) {
-            $okPw = Test-ZipPasswordSingle $FilePath $pw
-        } else {
-            $okPw = Test-Password7z $FilePath $pw
-        }
-        if ($okPw) {
+        if (Test-ArchivePassword $FilePath $pw) {
             $found = $pw
             if ($pw -eq '') { Write-Log 'OK password matched: <no password>' } else { Write-Log ("OK password matched: " + $pw) }
             Save-HotPassword $pw
             break
         }
+    }
     }
     }
 
@@ -751,22 +1032,32 @@ try {
         $repairedPath = Repair-BrokenZip $FilePath
         if ($repairedPath) {
             Write-Log 'Testing passwords against repaired zip...'
+            Initialize-ArchiveProbe $repairedPath
+            if (-not $script:ArcProbe.Ok) {
+                Write-Log 'probe (repaired): header is encrypted - validating with 7z l -p'
+            } elseif (-not $script:ArcProbe.AnyEncrypted) {
+                Write-Log 'probe (repaired): no encrypted entries (plain payload) - no password needed'
+            } else {
+                Write-Log ('probe (repaired): verifying against smallest encrypted entry: ' + $script:ArcProbe.MinEntry)
+            }
             $tryIndex = 0
             foreach ($pw in $attempts) {
                 $tryIndex++
                 if (($tryIndex % 25) -eq 0) {
                     Write-Log ("... repaired tried " + $tryIndex + "/" + $attempts.Count + " passwords")
                 }
-                if (Test-Password7z $repairedPath $pw) {
+                if (Test-ArchivePassword $repairedPath $pw) {
                     $found = $pw
-                    Write-Log ("OK password matched (repaired): " + $pw)
+                    if ($pw -eq '') { Write-Log 'OK password matched (repaired): <no password>' } else { Write-Log ("OK password matched (repaired): " + $pw) }
                     Save-HotPassword $pw
                     break
                 }
             }
             if ($null -eq $found) {
-                # mixed archives (plain payload + encrypted decoys) list fine
-                # without a password; extracting with any candidate still works
+                # No candidate matched. Mixed archives (plain payload + encrypted
+                # decoys) can still be extracted with an empty password, so keep
+                # the lenient fallback and let Invoke-7zExtract's 0-byte guard
+                # reject it if that was wrong.
                 $found = ''
                 Write-Log 'OK repaired zip opens without password (plain payload entry)'
             }
@@ -804,7 +1095,28 @@ try {
 
     $ok = $true
     $extractTarget = $FilePath
-    if ($repairedPath) {
+    if ($polyglotZip) {
+        # mp4 -> .zip alias -> WinRAR first (its scanner tolerates the polyglot
+        # layout). Only if that fails, rebuild the central directory and let the
+        # normal 7z/magic/WinRAR chain run on the repaired copy.
+        if ($polyglotAlias) {
+            $extractTarget = $polyglotAlias
+            Write-Log ('extracting mp4 polyglot from .zip alias: ' + $extractTarget)
+            if (Invoke-WinRARExtract $extractTarget $temp '') {
+                Write-Log 'OK mp4 polyglot extracted via WinRAR (no password)'
+                $winrarOk = $true
+            } else {
+                Write-Log 'WinRAR failed on mp4 polyglot; trying zip repair...'
+                $repairedPath = Repair-BrokenZip $extractTarget
+                if ($repairedPath) {
+                    $extractTarget = $repairedPath
+                    Write-Log ('extracting from repaired copy: ' + $extractTarget)
+                }
+            }
+        } else {
+            Write-Log 'WARN mp4 polyglot has no .zip alias; trying the original file'
+        }
+    } elseif ($repairedPath) {
         $extractTarget = $repairedPath
         Write-Log ('extracting from repaired copy: ' + $extractTarget)
     }
@@ -920,18 +1232,24 @@ try {
     if ($finalIsFile -and ($ArchiveExts -contains ([System.IO.Path]::GetExtension($final).ToLowerInvariant()))) {
         $nFile2 = $final
         $nParent2 = Split-Path $nFile2 -Parent
-        $nTemp2 = Join-Path $env:TEMP ('zh_nested_' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $nTemp2 -Force | Out-Null
+        $nTemp2 = New-SiblingTempDir $nFile2 'nested'
+        if (-not $nTemp2) { $nTemp2 = New-SiblingTempDir $nParent2 'nested' }
+        if (-not $nTemp2) { Write-Log 'FAIL nested staging dir unavailable'; exit 1 }
         $nPw2 = ''
-        if (-not (Test-ZipPasswordSingle $nFile2 '')) {
-            foreach ($pw in $attempts) { if (Test-ZipPasswordSingle $nFile2 $pw) { $nPw2 = $pw; Write-Log ("OK nested password matched: " + $pw); Save-HotPassword $pw; break } }
+        Initialize-ArchiveProbe $nFile2
+        foreach ($pw in $attempts) {
+            if (Test-ArchivePassword $nFile2 $pw) {
+                $nPw2 = $pw
+                if ($pw -eq '') { Write-Log 'OK nested single file needs no password' } else { Write-Log ("OK nested password matched: " + $pw); Save-HotPassword $pw }
+                break
+            }
         }
         $nOk2 = Invoke-7zExtract $nFile2 $nTemp2 $nPw2
         if ($nOk2) {
             $nFinal2 = Resolve-OutputDir $nFile2
             New-Item -ItemType Directory -Path $nFinal2 -Force | Out-Null
             Move-Contents $nTemp2 $nFinal2
-            try { Remove-Item -LiteralPath $nFile2 -Force -ErrorAction SilentlyContinue } catch {}
+            if (-not (Remove-File $nFile2)) { Write-Log ('WARN could not delete nested archive: ' + $nFile2) }
             $final = $nFinal2
             $finalIsFile = $false
             Write-Log ('OK nested single-file extracted -> ' + $final)
@@ -949,27 +1267,28 @@ try {
             Where-Object { $ArchiveExts -contains $_.Extension.ToLowerInvariant() })
         if ($nested.Count -eq 0) { break }
         $nestDepth++
-        Write-Log ("nested archives found: " + ($nested | ForEach-Object { $_.Name }) -join ', ')
+        Write-Log ("nested archives found: " + ((@($nested | ForEach-Object { $_.Name })) -join ', '))
         foreach ($n in $nested) {
             $nFile = $n.FullName
             Write-Log ('extracting nested: ' + $nFile)
-            $nTemp = Join-Path $env:TEMP ('zh_nested_' + [guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Path $nTemp -Force | Out-Null
+            $nTemp = New-SiblingTempDir $nFile 'nested'
+            if (-not $nTemp) { Write-Log ('WARN nested staging dir unavailable, skipped: ' + $nFile); continue }
             $nOk = $false
             $nPw = ''
-            # Encrypted zips: 'l' succeeds with any password, so verify a
-            # password by testing ONE entry (instant), then full extract.
-            # Plain archives extract directly with no password.
-            if (Test-ZipPasswordSingle $nFile '') {
-                $nPw = ''
-            } else {
-                foreach ($pw in $attempts) {
-                    if (Test-ZipPasswordSingle $nFile $pw) {
-                        $nPw = $pw
+            # 'l' answers exit 0 to every password on plaintext-header archives,
+            # so probe once and verify candidates against the smallest encrypted
+            # entry. Plain archives match on '' (the first candidate) at once.
+            Initialize-ArchiveProbe $nFile
+            foreach ($pw in $attempts) {
+                if (Test-ArchivePassword $nFile $pw) {
+                    $nPw = $pw
+                    if ($pw -eq '') {
+                        Write-Log 'OK nested needs no password'
+                    } else {
                         Write-Log ("OK nested password matched: " + $pw)
                         Save-HotPassword $pw
-                        break
                     }
+                    break
                 }
             }
             $nOk = Invoke-7zExtract $nFile $nTemp $nPw
@@ -987,7 +1306,9 @@ try {
                 if ($Collapse) {
                     Collapse-Nested $final ([System.IO.Path]::GetFileNameWithoutExtension($n.Name))
                 }
-                try { Remove-Item -LiteralPath $nFile -Force -ErrorAction SilentlyContinue } catch {}
+                # Permanent delete, not a recycle-bin move: a multi-GB nested
+                # archive would otherwise be copied to C:\$Recycle.Bin first.
+                if (-not (Remove-File $nFile)) { Write-Log ('WARN could not delete nested archive: ' + $nFile) }
                 Write-Log ('OK nested extracted and removed: ' + $nFile)
             } else {
                 Write-Log ('WARN nested extract failed, kept as-is: ' + $nFile)
@@ -1001,22 +1322,29 @@ try {
     if ($found -ne '' -or $nestDepth -gt 0) { Sync-Passwords -Force }
     Write-Log ("DONE " + $final)
     if ($DeleteSource -and (Test-Path -LiteralPath $FilePath)) {
-        if (Remove-File $FilePath) {
-            Write-Log ('OK deleted source: ' + $FilePath)
-            foreach ($sib in (Get-VolumeSiblings $FilePath)) {
-                if (Remove-File $sib) {
-                    Write-Log ('OK deleted sibling volume: ' + $sib)
-                } else {
-                    Write-Log ('WARN delete sibling volume failed: ' + $sib)
-                }
-            }
+        # Confirm the output before touching the source: an empty / all-zero-byte
+        # result means the extraction did not really succeed (wrong password left
+        # 0-byte decoys, or the archive was a decoy container).
+        $outStat = Get-OutputStat $final
+        if ($outStat.Files -le 0 -or $outStat.Bytes -le 0) {
+            Write-Log ('WARN output check failed (' + $outStat.Files + ' file(s), ' + $outStat.Bytes + ' byte(s)) - source kept: ' + $FilePath)
         } else {
-            Write-Log ('WARN delete source failed after retries: ' + $FilePath)
+            Write-Log ('OK confirmed output: ' + $outStat.Files + ' file(s), ' + $outStat.Bytes + ' byte(s)')
+            if (Remove-File $FilePath) {
+                Write-Log ('OK deleted source: ' + $FilePath)
+                foreach ($sib in (Get-VolumeSiblings $FilePath)) {
+                    if (Remove-File $sib) {
+                        Write-Log ('OK deleted sibling volume: ' + $sib)
+                    } else {
+                        Write-Log ('WARN delete sibling volume failed: ' + $sib)
+                    }
+                }
+            } else {
+                Write-Log ('WARN delete source failed after retries: ' + $FilePath)
+            }
         }
     }
     exit 0
 } finally {
-    if (Test-Path -LiteralPath $temp) {
-        [System.IO.Directory]::Delete($temp, $true)
-    }
+    Remove-AllTempDirs
 }

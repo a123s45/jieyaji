@@ -47,6 +47,42 @@ def save_config(cfg):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
+def _screen_metrics():
+    """(primary_w, primary_h, virt_x, virt_y, virt_w, virt_h); fallback to 1080p."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        return (
+            int(user32.GetSystemMetrics(0)),   # SM_CXSCREEN (primary)
+            int(user32.GetSystemMetrics(1)),   # SM_CYSCREEN (primary)
+            int(user32.GetSystemMetrics(76)),  # SM_XVIRTUALSCREEN
+            int(user32.GetSystemMetrics(77)),  # SM_YVIRTUALSCREEN
+            int(user32.GetSystemMetrics(78)),  # SM_CXVIRTUALSCREEN
+            int(user32.GetSystemMetrics(79)),  # SM_CYVIRTUALSCREEN
+        )
+    except Exception:
+        return (1920, 1080, 0, 0, 1920, 1080)
+
+
+def _valid_pos(x, y, w, h):
+    """Reject off-screen coordinates (pywebview reports x=-25600 when minimized)."""
+    if x is None or y is None:
+        return False
+    try:
+        x, y, w, h = int(x), int(y), int(w), int(h)
+    except (TypeError, ValueError):
+        return False
+    _, _, vx, vy, vw, vh = _screen_metrics()
+    return (x < vx + vw - 80 and y < vy + vh - 80
+            and x + w > vx + 80 and y + h > vy + 80)
+
+
+def _primary_center(w, h):
+    """Center of screen 1 for a window of size (w, h)."""
+    cw, ch, *_ = _screen_metrics()
+    return (max(0, (cw - w) // 2), max(0, (ch - h) // 2))
+
+
 @app.route('/')
 def index():
     return send_from_directory(WEBUI, 'index.html')
@@ -339,6 +375,8 @@ def setup_close_save(window):
     def persist(width, height, x, y):
         if width is None or height is None:
             return
+        if not _valid_pos(x, y, width, height):
+            x, y = None, None
         try:
             cfg = load_config()
             cfg['width'] = int(width)
@@ -419,6 +457,8 @@ if __name__ == '__main__':
     height = int(cfg.get('height', 640))
     x = cfg.get('x')
     y = cfg.get('y')
+    if not _valid_pos(x, y, width, height):
+        x, y = _primary_center(width, height)
     api = Api()
     window = webview.create_window(
         '解压姬 - 万能解压助手',

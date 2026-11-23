@@ -75,6 +75,15 @@ class UnsupportedScheme(Exception):
     pass
 
 
+# Verifying a password means decompressing the smallest entry into memory, once
+# per candidate. On an archive whose smallest entry is itself huge (a 2GB
+# single-file pack) that degenerates into "decompress everything for every
+# password" - measured at 375s on a 2GB single-file archive. Past this limit we
+# bail out to the 7z loop instead: there a wrong password is rejected instantly
+# by the AES check value, and only the right one pays for an extraction.
+VERIFY_SIZE_LIMIT = 64 * 1024 * 1024
+
+
 def try_zip(path, pw):
     import zipfile
     with zipfile.ZipFile(path) as zf:
@@ -86,6 +95,8 @@ def try_zip(path, pw):
                 best = info
         if best is None:
             return None  # nothing to verify against
+        if best.file_size > VERIFY_SIZE_LIMIT:
+            raise UnsupportedScheme()
         if best.compress_type == 99:
             # WinZip AES: zipfile can never verify this - bail out entirely,
             # let the 7z loop handle it instead of failing every attempt slowly
@@ -107,6 +118,8 @@ def try_7z(path, pw):
                 best = info
         if best is None:
             return None
+        if best.uncompressed > VERIFY_SIZE_LIMIT:
+            raise UnsupportedScheme()
         factory = BytesIOFactory(best.uncompressed + 4096)
         z.extract(targets=[best.filename], factory=factory)
         bio = factory.get(best.filename)
