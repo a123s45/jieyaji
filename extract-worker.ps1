@@ -11,11 +11,39 @@
 $ErrorActionPreference = 'Continue'
 $SevenZip = 'D:\解压姬\bin\extractors\7z\7z.exe'
 
+# Several workers run at once (threads > 1) and they all append to their own log
+# file, but the UI merges every job log into one panel - without a per-archive
+# tag the lines from 4 concurrent workers interleave into unreadable soup.
+$script:LogTag = '[' + [System.IO.Path]::GetFileName($FilePath) + ']'
+
 function Write-Log([string]$m) {
+    $line = if ($script:LogTag) { $script:LogTag + ' ' + $m } else { $m }
     if ($LogFile) {
-        Add-Content -LiteralPath $LogFile -Value $m -Encoding UTF8
+        Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
     } else {
-        [System.Console]::Out.WriteLine($m)
+        [System.Console]::Out.WriteLine($line)
+    }
+}
+
+# Cross-process mutex shared with pwtest.py (same name on both sides). Used to
+# guard read-modify-write cycles on shared files (hot password cache, password
+# book) that concurrent workers would otherwise clobber.
+function Invoke-WithFileMutex([string]$name, [scriptblock]$body) {
+    $mtx = $null
+    $acquired = $false
+    try {
+        $mtx = New-Object System.Threading.Mutex($false, $name)
+        try { $acquired = $mtx.WaitOne(20000) } catch { $acquired = $true }
+    } catch {
+        $mtx = $null
+    }
+    try {
+        return (& $body)
+    } finally {
+        if ($mtx) {
+            if ($acquired) { try { $mtx.ReleaseMutex() } catch {} }
+            try { $mtx.Dispose() } catch {}
+        }
     }
 }
 
@@ -474,23 +502,23 @@ function Get-HotPasswords {
 function Add-ToPasswordBook([string]$pw) {
     if ($pw -eq '' -or $pw -eq '__jieyaji_no_password__') { return }
     $pwFile = Join-Path $PSScriptRoot 'passwords.txt'
-    for ($r = 0; $r -lt 3; $r++) {
-        try {
-            if (-not (Test-Path -LiteralPath $pwFile)) { return }
-            $fs = [System.IO.File]::Open($pwFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+    # Same cross-process serialisation as the hot cache: an exclusive open
+    # (FileShare::None) with 3 short retries was easy for 8 concurrent workers
+    # to lose, and a lost password means the next archive pays the full loop.
+    Invoke-WithFileMutex 'Local\JieyajiPwBook' {
+        for ($r = 0; $r -lt 6; $r++) {
             try {
-                $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
-                $content = $sr.ReadToEnd()
-                $sr.Close()
-            } finally { $fs.Close() }
-            $lines = $content -split "`r?`n"
-            foreach ($l in $lines) { if ($l -eq $pw) { return } }
-            $enc = New-Object System.Text.UTF8Encoding($false)
-            for ($w = 0; $w -lt 3; $w++) {
-                try { [System.IO.File]::AppendAllText($pwFile, $pw + "`n", $enc); Write-Log ('OK added new password to book: ' + $pw); break } catch { Start-Sleep -Milliseconds 120 }
+                if (-not (Test-Path -LiteralPath $pwFile)) { return }
+                $content = [System.IO.File]::ReadAllText($pwFile, [System.Text.Encoding]::UTF8)
+                foreach ($l in ($content -split "`r?`n")) { if ($l -eq $pw) { return } }
+                $enc = New-Object System.Text.UTF8Encoding($false)
+                [System.IO.File]::AppendAllText($pwFile, $pw + "`n", $enc)
+                Write-Log ('OK added new password to book: ' + $pw)
+                return
+            } catch {
+                Start-Sleep -Milliseconds (200 * ($r + 1))
             }
-            return
-        } catch { Start-Sleep -Milliseconds 120 }
+        }
     }
 }
 
@@ -522,18 +550,49 @@ function Sync-Passwords {
 function Save-HotPassword([string]$pw) {
     if ($pw -eq '' -or $pw -eq '__jieyaji_no_password__') { return }
     $hot = Join-Path $PSScriptRoot 'data\hot_passwords.txt'
-    for ($r = 0; $r -lt 3; $r++) {
+    # Read-modify-write under a cross-process mutex: with threads > 1 several
+    # workers can hit different passwords at the same time and the last writer
+    # used to silently erase the others' entries (move-to-front lost updates).
+    Invoke-WithFileMutex 'Local\JieyajiHotPw' {
+        for ($r = 0; $r -lt 5; $r++) {
+            $tmp = ''
+            try {
+                $lines = @($pw) + @(Get-HotPasswords | Where-Object { $_ -ne $pw })
+                if ($lines.Count -gt 50) { $lines = $lines[0..49] }
+                $dir = Split-Path $hot -Parent
+                if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                $enc = New-Object System.Text.UTF8Encoding($false)
+                # Unique temp name per process: a fixed ".tmp" made concurrent
+                # workers write into the very same file and fight over the move.
+                $tmp = $hot + '.' + $PID + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                [System.IO.File]::WriteAllText($tmp, ($lines -join "`n") + "`n", $enc)
+                if (Test-Path -LiteralPath $hot) {
+                    # [NullString]::Value, NOT $null: PowerShell coerces $null to
+                    # "" for a [string] parameter, and Replace(..., "") throws
+                    # "The path is not of a legal form". That made every single
+                    # write fail through all retries - the hot cache silently
+                    # never grew while the password book got the entry.
+                    [System.IO.File]::Replace($tmp, $hot, [NullString]::Value)
+                } else {
+                    [System.IO.File]::Move($tmp, $hot)
+                }
+                break
+            } catch {
+                if ($r -eq 0) { Write-Log ('WARN hot password write failed: ' + $_.Exception.Message) }
+                if ($tmp) { try { [System.IO.File]::Delete($tmp) } catch {} }
+                Start-Sleep -Milliseconds (150 * ($r + 1))
+            }
+        }
+        # Sweep leftovers from a crashed run (still inside the mutex, so no
+        # other worker can be mid-write here).
         try {
-            $lines = @($pw) + @(Get-HotPasswords | Where-Object { $_ -ne $pw })
-            if ($lines.Count -gt 50) { $lines = $lines[0..49] }
             $dir = Split-Path $hot -Parent
-            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-            $enc = New-Object System.Text.UTF8Encoding($false)
-            $tmp = $hot + '.tmp'
-            [System.IO.File]::WriteAllText($tmp, ($lines -join "`n") + "`n", $enc)
-            Move-Item -LiteralPath $tmp -Destination $hot -Force
-            break
-        } catch { Start-Sleep -Milliseconds 120 }
+            if (Test-Path -LiteralPath $dir) {
+                foreach ($f in [System.IO.Directory]::GetFiles($dir, 'hot_passwords.txt.*.tmp')) {
+                    try { [System.IO.File]::Delete($f) } catch {}
+                }
+            }
+        } catch {}
     }
     Add-ToPasswordBook $pw
 }
@@ -663,10 +722,25 @@ function Remove-File([string]$path) {
 function Get-VolumeSiblings([string]$file) {
     $dir = Split-Path $file -Parent
     $leaf = Split-Path $file -Leaf
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($file)
     $pat = ''
-    if ($leaf -match '\.\d{3}$') { $pat = '^' + [regex]::Escape($base) + '\.\d{3}$' }
-    elseif ($leaf -match '\.part(\d+)\.rar$') { $pat = '^' + [regex]::Escape($base) + '\.part\d+\.rar$' }
+    if ($leaf -match '^(.+)\.\d{3}$') {
+        # 第1章.7z.001 / archive.zip.001 / bare archive.001
+        $pat = '^' + [regex]::Escape($matches[1]) + '\.\d{3}$'
+    } elseif ($leaf -match '^(.+)\.part\d+\.rar$') {
+        # archive.part1.rar. The stem must drop the whole ".partN.rar" tail:
+        # GetFileNameWithoutExtension would leave "archive.part1" behind and the
+        # old code then built "^archive\.part1\.part\d+\.rar$" - a pattern that
+        # can never match, so part2+ were never deleted alongside the first one.
+        $pat = '^' + [regex]::Escape($matches[1]) + '\.part\d+\.rar$'
+    } elseif ($leaf -match '\.z\d{2}$' -or
+              ($leaf -match '\.zip$' -and (Test-Path -LiteralPath (Join-Path $dir ([System.IO.Path]::GetFileNameWithoutExtension($leaf) + '.z01'))))) {
+        # WinZip split: archive.zip + archive.z01..z99 (first volume is the .zip)
+        $pat = '^' + [regex]::Escape([System.IO.Path]::GetFileNameWithoutExtension($leaf)) + '\.z\d{2}$'
+    } elseif ($leaf -match '\.r\d{2}$' -or
+              ($leaf -match '\.rar$' -and (Test-Path -LiteralPath (Join-Path $dir ([System.IO.Path]::GetFileNameWithoutExtension($leaf) + '.r00'))))) {
+        # old-style RAR split: archive.rar + archive.r00..r99 (first volume is the .rar)
+        $pat = '^' + [regex]::Escape([System.IO.Path]::GetFileNameWithoutExtension($leaf)) + '\.r\d{2}$'
+    }
     if (-not $pat) { return @() }
     return @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue |
         Where-Object { -not $_.PSIsContainer -and $_.Name -match $pat -and $_.FullName -ne $file } |
@@ -872,7 +946,7 @@ $name = Split-Path $FilePath -Leaf
 $isVol = $false
 $isFirstVol = $false
 if ($ext -match '^\.\d{3}$') { $isVol = $true; $isFirstVol = ($ext -eq '.001') }
-elseif ($name -match '\.part(\d+)\.rar$') { $isVol = $true; $isFirstVol = ($matches[1] -eq '1') }
+elseif ($name -match '\.part(\d+)\.rar$') { $isVol = $true; $isFirstVol = ([int]$matches[1] -eq 1) }
 elseif ($name -match '\.r\d\d$') { $isVol = $true }
 elseif ($name -match '\.z\d\d$') { $isVol = $true }
 if ($isVol -and -not $isFirstVol) {

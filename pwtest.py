@@ -15,14 +15,63 @@ Key ideas ported from Extractor (main.pas, test7zArchive / findPW):
   3. move-to-front: remember recently matched passwords in a hot list
 """
 import base64
+import ctypes
 import os
 import sys
+import uuid
+from contextlib import contextmanager
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE, 'bin', 'pylibs'))
 
 HOT_FILE = os.path.join(BASE, 'data', 'hot_passwords.txt')
 HOT_LIMIT = 50
+
+# Same mutex name as Invoke-WithFileMutex 'Local\JieyajiHotPw' in
+# extract-worker.ps1: worker processes and this helper must serialise their
+# read-modify-write cycles on the shared hot password cache.
+HOT_MUTEX_NAME = 'Local\\JieyajiHotPw'
+WAIT_OBJECT_0 = 0x00000000
+WAIT_ABANDONED = 0x00000080
+
+
+def _kernel32():
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k32.WaitForSingleObject.restype = ctypes.c_uint32
+    k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k32.ReleaseMutex.restype = ctypes.c_bool
+    k32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+    k32.CloseHandle.restype = ctypes.c_bool
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    return k32
+
+
+@contextmanager
+def file_mutex(name, timeout_ms=20000):
+    """Cross-process named mutex. Yields False on failure so callers degrade
+    instead of deadlocking (an unlocked write beats a hung worker)."""
+    k32 = None
+    handle = None
+    acquired = False
+    try:
+        k32 = _kernel32()
+        handle = k32.CreateMutexW(None, False, name)
+        if handle:
+            acquired = k32.WaitForSingleObject(handle, int(timeout_ms)) in (WAIT_OBJECT_0, WAIT_ABANDONED)
+    except Exception:
+        handle = None
+    try:
+        yield acquired
+    finally:
+        if handle and k32:
+            try:
+                if acquired:
+                    k32.ReleaseMutex(handle)
+                k32.CloseHandle(handle)
+            except Exception:
+                pass
 
 
 def read_passwords(pw_file):
@@ -58,17 +107,30 @@ def read_passwords(pw_file):
 def mark_hot(pw):
     if not pw:
         return
-    try:
-        lines = []
-        if os.path.isfile(HOT_FILE):
-            with open(HOT_FILE, 'r', encoding='utf-8-sig') as f:
-                lines = [l for l in f.read().splitlines() if l]
-        lines = [pw] + [l for l in lines if l != pw]
-        os.makedirs(os.path.dirname(HOT_FILE), exist_ok=True)
-        with open(HOT_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(lines[:HOT_LIMIT]) + '\n')
-    except OSError:
-        pass
+    # Several workers can match different passwords at the same moment. The old
+    # open('w') truncated the file in place, so a concurrent writer could read a
+    # half-written list (or erase the other worker's entry). Serialise on the
+    # shared mutex and swap in a fully written temp file atomically.
+    with file_mutex(HOT_MUTEX_NAME):
+        tmp = None
+        try:
+            lines = []
+            if os.path.isfile(HOT_FILE):
+                with open(HOT_FILE, 'r', encoding='utf-8-sig') as f:
+                    lines = [l for l in f.read().splitlines() if l]
+            lines = [pw] + [l for l in lines if l != pw]
+            os.makedirs(os.path.dirname(HOT_FILE), exist_ok=True)
+            tmp = '%s.%d.%s.tmp' % (HOT_FILE, os.getpid(), uuid.uuid4().hex[:8])
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines[:HOT_LIMIT]) + '\n')
+            os.replace(tmp, HOT_FILE)
+            tmp = None
+        except OSError:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 class UnsupportedScheme(Exception):

@@ -2,7 +2,7 @@
   "background": "",
   "panel_color": "#ffffff",
   "panel_opacity": 0.5,
-  "threads": 1,
+  "threads": 0,
   "delete_source": true,
   "width": 960,
   "height": 712,

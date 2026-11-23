@@ -198,6 +198,7 @@ main {
       <div>
         <label>解压线程</label>
         <select id="threads">
+          <option value="0">自动</option>
           <option value="1">1</option>
           <option value="2">2</option>
           <option value="3">3</option>
@@ -353,8 +354,11 @@ function applyConfig(cfg) {
     $('panelOpacity').value = cfg.panel_opacity;
     applyPanelOpacity(cfg.panel_opacity);
   }
-  if (cfg.threads) {
-    $('threads').value = String(cfg.threads);
+  if (cfg.threads !== undefined && cfg.threads !== null) {
+    const sel = $('threads');
+    sel.value = String(cfg.threads);
+    // stored value may not exist as an option (e.g. 5) - fall back to 自动
+    if (!sel.value) sel.value = '0';
   }
   if (typeof cfg.delete_source === 'boolean') {
     $('deleteSource').checked = cfg.delete_source;
