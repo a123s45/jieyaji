@@ -37,7 +37,7 @@ def load_config():
             'background': '',
             'panel_color': '#ffffff',
             'panel_opacity': 0.5,
-            'threads': 0,
+            'threads': 4,
             'delete_source': False,
             'width': 960,
             'height': 640,
@@ -495,7 +495,7 @@ def api_extract():
     if not files:
         return jsonify({'error': '选中的全是分卷的非首卷（.002/.z01/.r00 之类），无法单独解压；请拖首卷（.001 / .zip / .rar）'}), 400
     job_id = uuid.uuid4().hex
-    threads_raw = data.get('threads', 0)
+    threads_raw = data.get('threads', 4)
     threads = resolve_threads(threads_raw)
     try:
         is_auto = int(threads_raw) <= 0
