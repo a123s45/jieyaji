@@ -1,0 +1,13 @@
+# 解压姬 Web 版 - 需要 pip 安装的依赖
+# 适用：Windows 10/11 + Python 3.10 及以上（推荐 3.14）
+#
+#   pip install -r requirements.txt
+#
+# 说明：py7zr / pillow / psutil / pycryptodomex / brotli 等已经随仓库放在
+#      bin/pylibs/（cp314 编译的 .pyd），不需要在这里安装。
+#      如果你的 Python 不是 3.14，可以额外装一份：
+#         pip install py7zr pillow
+#      程序会自动优先使用 bin/pylibs，缺失时回落 py7zr 或 7z.dll。
+
+flask>=3.0
+pywebview>=5.4

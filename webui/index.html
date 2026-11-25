@@ -208,7 +208,7 @@ main {
       <button id="btnStart" class="primary">开始解压</button>
       <div>
         <label>密码本</label>
-        <input type="text" id="pwFile" value="D:\解压姬\passwords.txt">
+        <input type="text" id="pwFile" placeholder="留空 = 程序目录下的 passwords.txt">
       </div>
       <div>
         <label>解压线程</label>
@@ -399,6 +399,9 @@ function applyConfig(cfg) {
   }
   if (typeof cfg.delete_source === 'boolean') {
     $('deleteSource').checked = cfg.delete_source;
+  }
+  if (cfg.password_file) {
+    $('pwFile').value = cfg.password_file;
   }
 }
 

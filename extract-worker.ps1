@@ -1,7 +1,8 @@
 ﻿param(
     [Parameter(Mandatory=$true)][string]$FilePath,
-    [string]$PasswordFile = 'D:\解压姬\passwords.txt',
-    [string]$MagicExe = 'D:\解压姬\magic-extractor.exe',
+    [string]$PasswordFile = '',
+    [string]$MagicExe = '',
+    [string]$PythonExe = '',
     [switch]$Collapse,
     [switch]$DeleteSource,
     [switch]$MagicFallback,
@@ -9,7 +10,33 @@
 )
 
 $ErrorActionPreference = 'Continue'
-$SevenZip = 'D:\解压姬\bin\extractors\7z\7z.exe'
+
+# 所有依赖路径都跟着脚本目录走，不再写死 D:\解压姬 —— 别人把仓库克隆到哪都能跑
+if (-not $PasswordFile) { $PasswordFile = Join-Path $PSScriptRoot 'passwords.txt' }
+if (-not $MagicExe) { $MagicExe = Join-Path $PSScriptRoot 'magic-extractor.exe' }
+$SevenZip = Join-Path $PSScriptRoot 'bin\extractors\7z\7z.exe'
+
+# 找 python：优先用调用方（jieyaji_web.py 传它自己的 sys.executable），
+# 其次环境变量、PATH、常见安装位置。都找不到就返回 ''，调用方跳过快速通道回落 7z。
+$script:PythonExeResolved = $null
+function Get-PythonExe {
+    if ($null -ne $script:PythonExeResolved) { return $script:PythonExeResolved }
+    $cands = @()
+    if ($PythonExe) { $cands += $PythonExe }
+    if ($env:JIEYAJI_PYTHON) { $cands += $env:JIEYAJI_PYTHON }
+    try { $c = Get-Command python.exe -ErrorAction Stop; $cands += $c.Source } catch {}
+    if ($env:LOCALAPPDATA) {
+        foreach ($v in @('Python314', 'Python313', 'Python312', 'Python311')) {
+            $cands += (Join-Path $env:LOCALAPPDATA ('Programs\Python\' + $v + '\python.exe'))
+        }
+    }
+    $cands += 'C:\Python314\python.exe'
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path -LiteralPath $c)) { $script:PythonExeResolved = $c; return $c }
+    }
+    $script:PythonExeResolved = ''
+    return ''
+}
 
 # Several workers run at once (threads > 1) and they all append to their own log
 # file, but the UI merges every job log into one panel - without a per-archive
@@ -445,8 +472,8 @@ function Invoke-7zExtract([string]$file, [string]$outDir, [string]$pw) {
 function Test-PasswordFast([string]$file, [string]$pwFile) {
     $script = Join-Path $PSScriptRoot 'pwtest.py'
     if (-not (Test-Path -LiteralPath $script)) { return $null }
-    $py = 'C:\Python314\python.exe'
-    if (-not (Test-Path -LiteralPath $py)) { $py = 'python' }
+    $py = Get-PythonExe
+    if (-not $py) { return $null }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $py
     $psi.UseShellExecute = $false
@@ -529,8 +556,8 @@ function Sync-Passwords {
     $script:didSync = $true
     $sync = Join-Path $PSScriptRoot 'sync-passwords.py'
     if (-not (Test-Path -LiteralPath $sync)) { return }
-    $py = 'C:\Python314\python.exe'
-    if (-not (Test-Path -LiteralPath $py)) { $py = 'python' }
+    $py = Get-PythonExe
+    if (-not $py) { return }
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $py
@@ -901,8 +928,8 @@ $ArchiveExts = @('.rar', '.zip', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.tbz2', 
 # 7z can open, then the normal password loop + extraction runs on the copy.
 # Returns the repaired path, or '' when not applicable/failed.
 function Repair-BrokenZip([string]$file) {
-    $py = 'C:\Python314\python.exe'
-    if (-not (Test-Path -LiteralPath $py)) { return '' }
+    $py = Get-PythonExe
+    if (-not $py) { return '' }
     $script = Join-Path $PSScriptRoot 'repair-broken-zip.py'
     if (-not (Test-Path -LiteralPath $script)) { return '' }
     $repairDir = New-SiblingTempDir $file 'repair'

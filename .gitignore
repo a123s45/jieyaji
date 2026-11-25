@@ -10,3 +10,4 @@ backgrounds/
 # local safety copies
 *.bak-*
 *.good-*
+gui_config.json

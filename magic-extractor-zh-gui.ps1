@@ -358,11 +358,12 @@ Add-Type -TypeDefinition $cs -ReferencedAssemblies $refs
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
-$MagicExe = 'D:\解压姬\magic-extractor.exe'
-$DefaultPwFile = 'D:\解压姬\passwords.txt'
-$ConfigPath = 'D:\解压姬\gui_config.ini'
-$BgFolder = 'D:\解压姬\backgrounds'
-$WorkerScript = 'D:\解压姬\extract-worker.ps1'
+$AppRoot = $PSScriptRoot
+$MagicExe = Join-Path $AppRoot 'magic-extractor.exe'
+$DefaultPwFile = Join-Path $AppRoot 'passwords.txt'
+$ConfigPath = Join-Path $AppRoot 'gui_config.ini'
+$BgFolder = Join-Path $AppRoot 'backgrounds'
+$WorkerScript = Join-Path $AppRoot 'extract-worker.ps1'
 
 $script:queue = [System.Collections.Generic.List[string]]::new()
 $script:busy = $false
@@ -931,7 +932,7 @@ if ($SelfTest) {
     $fake = Join-Path $testRoot 'abc.mp4'
     $pwFile = Join-Path $testRoot 'pw.txt'
     Set-Content -LiteralPath $pwFile -Value @('wrongpw', '123456') -Encoding UTF8
-    & 'D:\解压姬\bin\extractors\7z\7z.exe' a -tzip -p123456 $fake (Join-Path $testRoot 'abc\secret.txt') | Out-Null
+    & (Join-Path $AppRoot 'bin\extractors\7z\7z.exe') a -tzip -p123456 $fake (Join-Path $testRoot 'abc\secret.txt') | Out-Null
     $tempOut = Join-Path $testRoot 'temp_out'
     New-Item -ItemType Directory -Path $tempOut -Force | Out-Null
     $ok = $false

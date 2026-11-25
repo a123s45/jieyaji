@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -10,7 +11,7 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
-BASE = r'D:\解压姬'
+BASE = os.path.dirname(os.path.abspath(__file__))
 WEBUI = os.path.join(BASE, 'webui')
 BG = os.path.join(BASE, 'backgrounds')
 CONFIG = os.path.join(BASE, 'gui_config.json')
@@ -109,6 +110,9 @@ def api_config():
         data = request.get_json(force=True, silent=True) or {}
         cfg.update(data)
         save_config(cfg)
+    cfg = dict(cfg)
+    # 密码本位置跟脚本目录走，只回给前端，不写进配置文件（换机器就不对了）
+    cfg['password_file'] = PW_DEFAULT
     return jsonify(cfg)
 
 
@@ -141,7 +145,15 @@ def api_password():
     pw = str(data.get('password', ''))
     if not pw:
         return jsonify({'error': 'empty password'}), 400
-    targets = [PW_DEFAULT, r'D:\Extractor\passwords.txt']
+    # 密码本按脚本所在目录定位；新克隆的仓库里还没有这个文件，就现建一个
+    targets = [PW_DEFAULT]
+    try:
+        if not os.path.isfile(PW_DEFAULT):
+            os.makedirs(os.path.dirname(PW_DEFAULT) or '.', exist_ok=True)
+            with open(PW_DEFAULT, 'a', encoding='utf-8'):
+                pass
+    except OSError:
+        pass
     added = False
     updated = []
     for path in dict.fromkeys(targets):
@@ -363,6 +375,7 @@ def _run_worker_inner(job, file_path):
         '-FilePath', file_path,
         '-PasswordFile', job['password_file'],
         '-MagicExe', MAGIC,
+        '-PythonExe', sys.executable,
         '-LogFile', log_path,
     ]
     if job.get('collapse'):
